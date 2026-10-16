@@ -25,3 +25,19 @@ fn load_and_name() {
         Err(e) => panic!("load failed: {}", e.0),
     }
 }
+
+#[test]
+fn impulse_passes_through() {
+    let Ok(path) = std::env::var("SOLIDVERB_DLL") else { return; };
+    let data = std::fs::read(&path).expect("read dll");
+    let mut v = Vst32::load(&data).expect("load");
+    // 先頭だけ 1.0 のインパルスを通す。既定のパラメーターはドライ寄りなので、素通しに近い音が返る
+    let n = 256;
+    let mut imp = vec![0f32; n];
+    imp[0] = 1.0;
+    let out = v.process(&[imp.clone(), imp.clone()], n).expect("process");
+    let energy: f32 = out[0].iter().map(|x| x.abs()).sum();
+    println!("出力のエネルギー= {energy:.4}（0 でなければ素通しできている）");
+    assert!(out[0].iter().all(|x| x.is_finite()));
+    assert!(energy > 0.0, "出力が全部 0（素通しもできていない）");
+}

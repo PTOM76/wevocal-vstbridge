@@ -14,7 +14,8 @@ mod off {
     pub const NUM_PARAMS: u64 = 24;
     pub const NUM_INPUTS: u64 = 28;
     pub const NUM_OUTPUTS: u64 = 32;
-    pub const PROCESS_REPLACING: u64 = 64;
+    // 32 ビットの AEffect: offset 64 は object、68 は user、72 uniqueID、76 version、80 processReplacing
+    pub const PROCESS_REPLACING: u64 = 80;
 }
 
 const VST_MAGIC: u64 = 0x5673_7450; // 'VstP'
