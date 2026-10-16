@@ -1,0 +1,8 @@
+[package]
+name = "vstbridge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }
+object = { version = "0.36", default-features = false, features = ["read_core", "pe", "std"] }
