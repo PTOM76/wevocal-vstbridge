@@ -16,6 +16,7 @@ mod off {
 }
 
 const VST_MAGIC: u64 = 0x5673_7450; // 'VstP'
+const EFF_GET_PARAM_NAME: u64 = 8;
 const EFF_GET_EFFECT_NAME: u64 = 45;
 
 pub struct Vst {
@@ -73,6 +74,18 @@ impl Vst {
         // dispatcher(effect, opcode, index, value, ptr, opt)
         self.emu.call(dispatcher, &[Arg::Int(self.effect), Arg::Int(EFF_GET_EFFECT_NAME), Arg::Int(0), Arg::Int(0), Arg::Int(buf), Arg::F32(0.0)])?;
         self.emu.mem.read_cstr(buf, 64)
+    }
+
+    /// つまみの名前（dispatcher(effGetParamName, index, 0, buf, 0)）。dispatcher が無ければ "Param n"
+    pub fn param_name(&mut self, index: i32) -> R<String> {
+        let dispatcher = self.ptr(off::DISPATCHER)?;
+        if dispatcher == 0 {
+            return Ok(format!("Param {index}"));
+        }
+        let buf = self.emu.mem.alloc(64);
+        self.emu.call(dispatcher, &[Arg::Int(self.effect), Arg::Int(EFF_GET_PARAM_NAME), Arg::Int(index as u64), Arg::Int(0), Arg::Int(buf), Arg::F32(0.0)])?;
+        let name = self.emu.mem.read_cstr(buf, 64)?;
+        Ok(if name.is_empty() { format!("Param {index}") } else { name })
     }
 
     pub fn set_param(&mut self, index: i32, value: f32) -> R<()> {

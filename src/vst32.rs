@@ -23,6 +23,7 @@ const EFF_OPEN: u64 = 0;
 const EFF_SET_SAMPLE_RATE: u64 = 10;
 const EFF_SET_BLOCK_SIZE: u64 = 11;
 const EFF_MAINS_CHANGED: u64 = 12;
+const EFF_GET_PARAM_NAME: u64 = 8;
 const EFF_GET_EFFECT_NAME: u64 = 45;
 
 pub struct Vst32 {
@@ -87,6 +88,18 @@ impl Vst32 {
 
     fn ptr(&self, field: u64) -> R<u32> {
         Ok(self.emu.mem.read_n(self.effect as u64 + field, 4)? as u32)
+    }
+
+    /// つまみの名前（dispatcher(effGetParamName, index, 0, buf, 0)）。dispatcher が無ければ "Param n"
+    pub fn param_name(&mut self, index: i32) -> R<String> {
+        let dispatcher = self.ptr(off::DISPATCHER)?;
+        if dispatcher == 0 {
+            return Ok(format!("Param {index}"));
+        }
+        let buf = self.emu.mem.alloc32(64);
+        self.emu.call32(dispatcher, &[Arg::Int(self.effect as u64), Arg::Int(EFF_GET_PARAM_NAME), Arg::Int(index as u64), Arg::Int(0), Arg::Int(buf as u64), Arg::F32(0.0)])?;
+        let name = self.emu.mem.read_cstr(buf as u64, 64)?;
+        Ok(if name.is_empty() { format!("Param {index}") } else { name })
     }
 
     pub fn set_param(&mut self, index: i32, value: f32) -> R<()> {
