@@ -23,11 +23,17 @@ pub struct Cpu {
     pub width: u8,
     /// fs セグメントの基点（32 ビットの Windows ではスレッド環境ブロック TEB。fs:[0] が SEH の鎖の先頭）
     pub fs_base: u64,
+    /// x87 の FPU（8 本のレジスタスタック）。本物は 80 ビットだが、音の処理には f64 で足りる。st(0) は fpu[fpu_top]
+    pub fpu: [f64; 8],
+    /// スタックの先頭（st(0)）の添字。push で 1 減り、pop で 1 増える（8 で回る）
+    pub fpu_top: usize,
+    /// x87 の C0〜C3 の比較の結果（fcom、fnstsw で使う。bit8=C0、bit14=C3 として状態ワードに入れる）
+    pub fpu_c: (bool, bool, bool, bool),
 }
 
 impl Default for Cpu {
     fn default() -> Self {
-        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0 }
+        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0, fpu: [0.0; 8], fpu_top: 0, fpu_c: (false, false, false, false) }
     }
 }
 
@@ -197,5 +203,47 @@ impl Cpu {
             ConditionCode::g => !f.zf && f.sf == f.of,
             ConditionCode::None => true,
         }
+    }
+
+    /// x87: st(0) を読む
+    pub fn st(&self, n: usize) -> f64 {
+        self.fpu[(self.fpu_top + n) % 8]
+    }
+
+    /// x87: st(n) に書く
+    pub fn set_st(&mut self, n: usize, v: f64) {
+        self.fpu[(self.fpu_top + n) % 8] = v;
+    }
+
+    /// x87: スタックに積む（top を 1 減らして st(0) にする）
+    pub fn fpush(&mut self, v: f64) {
+        self.fpu_top = (self.fpu_top + 7) % 8;
+        self.fpu[self.fpu_top] = v;
+    }
+
+    /// x87: スタックから下ろす（st(0) を捨てて top を 1 進める）
+    pub fn fpop(&mut self) -> f64 {
+        let v = self.fpu[self.fpu_top];
+        self.fpu_top = (self.fpu_top + 1) % 8;
+        v
+    }
+
+    /// x87: 2 つの値を比べて C3、C2、C0 を決める（C2 は順序づけできないとき）
+    pub fn fcom(&mut self, a: f64, b: f64) {
+        self.fpu_c = if a.is_nan() || b.is_nan() {
+            (true, false, true, true) // 比べられない: C3=C2=C0=1
+        } else if a > b {
+            (false, false, false, false)
+        } else if a < b {
+            (true, false, false, false) // C0=1
+        } else {
+            (false, false, false, true) // C3=1
+        };
+    }
+
+    /// x87: 状態ワード（fnstsw）。C0 は bit8、C1 は bit9、C2 は bit10、C3 は bit14。top は bit11〜13
+    pub fn fpu_status(&self) -> u16 {
+        let (c0, c1, c2, c3) = self.fpu_c;
+        (c0 as u16) << 8 | (c1 as u16) << 9 | (c2 as u16) << 10 | ((self.fpu_top as u16 & 7) << 11) | (c3 as u16) << 14
     }
 }

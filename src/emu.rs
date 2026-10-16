@@ -170,6 +170,9 @@ impl Emu {
         if sse::exec(&mut self.cpu, &mut self.mem, insn)? {
             return Ok(());
         }
+        if crate::x87::exec(&mut self.cpu, &mut self.mem, insn)? {
+            return Ok(());
+        }
         Err(Fault(format!("unimplemented {insn} @ {:#x}", insn.ip())))
     }
 }

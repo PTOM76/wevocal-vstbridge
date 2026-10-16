@@ -12,3 +12,4 @@ pub mod pe32;
 pub mod sse;
 pub mod vst;
 pub mod vst32;
+pub mod x87;

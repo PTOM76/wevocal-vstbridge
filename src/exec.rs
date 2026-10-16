@@ -160,6 +160,20 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             cpu.flags.of = over;
             cpu.write_op(mem, i, 0, r)?;
         }
+        // ah の下位 8 ビットをフラグに移す（sf、zf、af、pf、cf。bit1 は常に 1）。浮動小数点の比較の結果を使うときに出る
+        M::Sahf => {
+            let ah = (cpu.regs[0] >> 8) & 0xff;
+            cpu.flags.cf = ah & 1 != 0;
+            cpu.flags.pf = ah & 4 != 0;
+            cpu.flags.zf = ah & 0x40 != 0;
+            cpu.flags.sf = ah & 0x80 != 0;
+        }
+        // フラグを ah に集める（sahf の逆）
+        M::Lahf => {
+            let f = cpu.flags;
+            let ah = 2 | (f.cf as u64) | (f.pf as u64) << 2 | (f.zf as u64) << 6 | (f.sf as u64) << 7;
+            cpu.set_reg(iced_x86::Register::AH, ah)?;
+        }
         M::Cdqe => cpu.regs[0] = sext(cpu.regs[0], 4),
         M::Cdq => cpu.regs[2] = if sign(cpu.regs[0], 4) { 0xffff_ffff } else { 0 },
         M::Cqo => cpu.regs[2] = if sign(cpu.regs[0], 8) { u64::MAX } else { 0 },
