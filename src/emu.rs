@@ -32,6 +32,10 @@ pub struct Emu {
     pub loaded: Vec<String>,
     /// GetProcAddress で作った入口の番地（DLL 名と関数名ごとに 1 つだけ作る）
     pub procs: HashMap<(String, String), u64>,
+    /// ホストのヒープで確保したブロックの大きさ（番地 → バイト数）。HeapReAlloc で中身を写すために覚える
+    pub heap_sizes: HashMap<u64, usize>,
+    /// x87 で最初に NaN になる命令を見張る（環境変数 VSTBRIDGE_NAN があるときだけ）
+    nan_watch: bool,
 }
 
 impl Emu {
@@ -62,7 +66,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new() }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok() }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -170,7 +174,18 @@ impl Emu {
         if sse::exec(&mut self.cpu, &mut self.mem, insn)? {
             return Ok(());
         }
-        if crate::x87::exec(&mut self.cpu, &mut self.mem, insn)? {
+        if self.nan_watch {
+            let before: Vec<f64> = (0..8).map(|n| self.cpu.st(n)).collect();
+            if crate::x87::exec(&mut self.cpu, &mut self.mem, insn)? {
+                if !before.iter().any(|v| !v.is_finite()) && (0..8).any(|n| !self.cpu.st(n).is_finite()) {
+                    eprintln!("[nan] 最初に NaN か inf になった x87 命令: {insn} @ {:#x}
+  前: {:?}
+  後: {:?}", insn.ip(), before, (0..8).map(|n| self.cpu.st(n)).collect::<Vec<_>>());
+                    self.nan_watch = false;
+                }
+                return Ok(());
+            }
+        } else if crate::x87::exec(&mut self.cpu, &mut self.mem, insn)? {
             return Ok(());
         }
         Err(Fault(format!("unimplemented {insn} @ {:#x}", insn.ip())))

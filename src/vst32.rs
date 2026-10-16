@@ -20,6 +20,7 @@ mod off {
 
 const VST_MAGIC: u64 = 0x5673_7450; // 'VstP'
 const EFF_OPEN: u64 = 0;
+const EFF_SET_PROGRAM: u64 = 2;
 const EFF_SET_SAMPLE_RATE: u64 = 10;
 const EFF_SET_BLOCK_SIZE: u64 = 11;
 const EFF_MAINS_CHANGED: u64 = 12;
@@ -71,6 +72,7 @@ impl Vst32 {
         let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs };
         // ホストが普通に行う初期化（開く、サンプルレート、ブロックサイズ、電源オン）。これをしないと内部バッファが未初期化のまま
         v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
+        v.dispatch(EFF_SET_PROGRAM, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 0, 48000.0)?;
         v.dispatch(EFF_SET_BLOCK_SIZE, 0, 0, 2048, 0.0)?;
         v.dispatch(EFF_MAINS_CHANGED, 0, 1, 0, 0.0)?;

@@ -67,10 +67,14 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 let size = i.memory_size().size();
                 if is_int(i) {
                     // fisttp は 0 方向への切り捨て、fist/fistp は丸め（最も近い）
-                    let n = if m == M::Fisttp { v.trunc() } else { v.round() } as i64;
+                    let n = if m == M::Fisttp { v.trunc() } else { v.round_ties_even() } as i64;
                     mem.write_n(a, size, n as u64)?;
                 } else if size == 4 {
-                    mem.write_n(a, 4, (v as f32).to_bits() as u64)?;
+                    let f = v as f32;
+                    if !f.is_finite() && std::env::var("VSTBRIDGE_NAN").is_ok() {
+                        eprintln!("[nan] f32 に書いた値が非有限: {i} @ {:#x} → {a:#x} に {f}（元の値 {v}）  steps={}", i.ip(), cpu.steps);
+                    }
+                    mem.write_n(a, 4, f.to_bits() as u64)?;
                 } else {
                     mem.write_n(a, 8, v.to_bits())?;
                 }
@@ -108,7 +112,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             cpu.set_st(0, v);
         }
         M::Frndint => {
-            let v = cpu.st(0).round();
+            let v = cpu.st(0).round_ties_even();
             cpu.set_st(0, v);
         }
         // 超越関数（st(0) を書き換える）
