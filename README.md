@@ -65,7 +65,18 @@ cargo install wasm-bindgen-cli --version 0.2.129  # Cargo.toml の wasm-bindgen 
 node tests/gain.wasm.mjs
 ```
 
-`pkg/` と `pkg-web/` は生成物（リポジトリに含めない）。ブラウザ（実機）で動かす確かめはまだで、Node での確かめだけ済んでいる。
+`pkg/` と `pkg-web/` は生成物（リポジトリに含めない）。
+
+### ブラウザ（実機）で確かめる
+
+```bash
+cp -r pkg-web tests/browser/pkg-web
+cp testplug/gain.dll tests/browser/gain.dll
+node tests/browser/serve.mjs &
+"/path/to/chrome" --headless=new --disable-gpu --no-sandbox --virtual-time-budget=5000 --dump-dom http://localhost:8991/
+```
+
+`tests/browser/index.html` が wasm を読み込み、`gain.dll` を動かした結果を画面（`<pre id="out">`）に出す。`RESULT: OK` ならネイティブと一致。`tests/browser/pkg-web` と `gain.dll` は生成物・バイナリなので含めない（上の手順でコピーする）。
 
 ## License
 This project is licensed under the Mozilla Public License 2.0 (MPL-2.0).

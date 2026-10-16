@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>vstbridge ブラウザでの確かめ</title>
+  </head>
+  <body>
+    <pre id="out">running...</pre>
+    <script type="module">
+      import init, { JsVst } from './pkg-web/vstbridge.js'
+
+      const out = document.getElementById('out')
+      const log = (...a) => {
+        out.textContent += a.join(' ') + '\n'
+      }
+
+      try {
+        await init()
+        const dll = new Uint8Array(await (await fetch('./gain.dll')).arrayBuffer())
+        const v = new JsVst(dll)
+        const name = v.name()
+        log('name:', name)
+        log('numParams:', v.numParams, 'numInputs:', v.numInputs, 'numOutputs:', v.numOutputs)
+
+        v.setParam(0, 0.25)
+        log('param0:', v.getParam(0))
+
+        const n = 8
+        const sine = Float32Array.from({ length: n }, (_, i) => Math.sin((2 * Math.PI * 1000 * i) / 48000))
+        const result = v.process([sine, sine], n)
+        const out0 = Array.from(result[0])
+        log('output[0]:', JSON.stringify(out0))
+
+        const want = [0, 0.032632, 0.064705, 0.095671, 0.125, 0.15219, 0.176777, 0.198338]
+        const ok = out0.every((x, i) => Math.abs(x - want[i]) < 1e-5) && name === 'WeVocal Test Gain'
+        log(ok ? 'RESULT: OK' : 'RESULT: NG')
+      } catch (e) {
+        log('ERROR:', e.message)
+        log('RESULT: NG')
+      }
+    </script>
+  </body>
+</html>

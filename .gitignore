@@ -3,3 +3,5 @@
 *.dll
 /pkg
 /pkg-web
+/tests/browser/pkg-web
+/tests/browser/gain.dll
