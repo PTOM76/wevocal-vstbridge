@@ -12,7 +12,7 @@ WeVocal Studio と WeVocalSynth で VST を読み込むための実行環境と�
 | 本体とのつなぎ方 | WeVocal プラグイン（`format: "vst"`）の形だけ。本体の中には触れない |
 
 ## 今の状態
-x64 の PE（DLL）を読み込み、命令を 1 つずつ実行して、VST2 の `processReplacing` を通すところまでを作っている途中である。
+x64 の PE（DLL）を読み込み、命令を 1 つずつ実行して、VST2 の `processReplacing` を通せるようになった。試すための VST2（`testplug/gain.dll`、音量を変えるだけ）を、ネイティブのホストと、自前のエミュレーター（Rust）と、wasm にしたものの 3 通りで動かし、名前・つまみ・音の処理の結果がすべて一致することを確かめた。
 
 | ファイル | 中身 |
 | --- | --- |
@@ -23,10 +23,11 @@ x64 の PE（DLL）を読み込み、命令を 1 つずつ実行して、VST2 �
 | `src/sse.rs` | SSE の命令の実行 |
 | `src/emu.rs` | エミュレーターの本体。Windows x64 の呼び出しの決まりで DLL の関数を呼び、ホストの関数（import、コールバック）は入口の番地で Rust に回す |
 | `src/vst.rs` | VST2 の読み込み（`AEffect`、dispatcher、つまみ、`processReplacing`） |
+| `src/js.rs` | wasm-bindgen の窓口（`#[cfg(target_arch = "wasm32")]`）。JS から読み込み、つまみ、音の処理を使えるようにする |
 | `testplug/` | 試すためのプラグインと、ネイティブのホスト |
-| `tests/` | 確かめ（`gain.rs`） |
+| `tests/` | 確かめ（`gain.rs` は Rust のネイティブ、`gain.wasm.mjs` は Node で wasm を動かす確かめ） |
 
-未対応の命令と API は、実行のログとエラーから洗い出して足していく。wasm 化、JIT、Windows の API の本格的な実装、VST3（64 ビット）への対応はまだである。
+未対応の命令と API は、実行のログとエラーから洗い出して足していく。JIT、Windows の API の本格的な実装、VST3（64 ビット）への対応はまだである。ブラウザ（実機）で動かす確かめもまだ（Node では確かめた）。
 
 ## 技術スタック
 | 項目 | 内容 |
@@ -34,6 +35,7 @@ x64 の PE（DLL）を読み込み、命令を 1 つずつ実行して、VST2 �
 | 言語 | Rust（edition 2024） |
 | 命令の解読 | [iced-x86](https://crates.io/crates/iced-x86) |
 | PE の解析 | [object](https://crates.io/crates/object) |
+| wasm 化 | [wasm-bindgen](https://crates.io/crates/wasm-bindgen)（`wasm32-unknown-unknown`） |
 
 ## セットアップ
 ```bash
@@ -53,6 +55,17 @@ gcc -O2 -o host.exe host.c
 ```
 
 `host.exe` は、ネイティブの Windows で DLL を動かし、1 kHz の正弦波を通した結果と、名前、つまみの値を表示する。エミュレーターの結果は、これと比べる。
+
+### wasm で確かめる
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli --version 0.2.129  # Cargo.toml の wasm-bindgen と同じ版
+./build-wasm.sh    # pkg/（Node 向け）と pkg-web/（ブラウザ向け）を作る
+node tests/gain.wasm.mjs
+```
+
+`pkg/` と `pkg-web/` は生成物（リポジトリに含めない）。ブラウザ（実機）で動かす確かめはまだで、Node での確かめだけ済んでいる。
 
 ## License
 This project is licensed under the Mozilla Public License 2.0 (MPL-2.0).

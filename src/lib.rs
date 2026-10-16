@@ -3,6 +3,8 @@
 pub mod cpu;
 pub mod emu;
 pub mod exec;
+#[cfg(target_arch = "wasm32")]
+pub mod js;
 pub mod mem;
 pub mod pe;
 pub mod sse;

@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "MPL-2.0"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel", "instr_info"] }
+js-sys = "0.3.106"
 object = { version = "0.36", default-features = false, features = ["read_core", "pe", "std"] }
+wasm-bindgen = "0.2.129"

@@ -1,3 +1,5 @@
 /target
 *.exe
 *.dll
+/pkg
+/pkg-web
