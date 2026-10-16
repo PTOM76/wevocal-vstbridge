@@ -12,12 +12,13 @@ fn dst_size(i: &Instruction) -> usize {
     }
 }
 
-/// 足し算と引き算（cmp も）。結果とフラグ
-fn add_sub(cpu: &mut Cpu, a: u64, b: u64, size: usize, sub: bool) -> u64 {
+/// 足し算と引き算（cmp も）。結果とフラグ。carry は adc、sbb のときの繰り上がり（0 か 1）
+fn add_sub(cpu: &mut Cpu, a: u64, b: u64, size: usize, sub: bool, carry: u64) -> u64 {
     let m = mask(size);
     let (a, b) = (a & m, b & m);
-    let r = if sub { a.wrapping_sub(b) } else { a.wrapping_add(b) } & m;
-    cpu.flags.cf = if sub { a < b } else { (a as u128 + b as u128) > m as u128 };
+    // 繰り上がりは b に足さず別に扱う（b が全部 1 のとき、足して 0 になるとキャリーが消えるため）
+    let r = if sub { a.wrapping_sub(b).wrapping_sub(carry) } else { a.wrapping_add(b).wrapping_add(carry) } & m;
+    cpu.flags.cf = if sub { (a as u128) < (b as u128 + carry as u128) } else { (a as u128 + b as u128 + carry as u128) > m as u128 };
     cpu.flags.of = if sub { sign(a, size) != sign(b, size) && sign(r, size) != sign(a, size) } else { sign(a, size) == sign(b, size) && sign(r, size) != sign(a, size) };
     cpu.set_szp(r, size);
     r
@@ -56,9 +57,8 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             let size = dst_size(i);
             let (a, _) = cpu.read_op(mem, i, 0)?;
             let (b, _) = cpu.read_op(mem, i, 1)?;
-            let carry = matches!(m, M::Adc | M::Sbb) && cpu.flags.cf;
-            let b = b.wrapping_add(carry as u64);
-            let r = add_sub(cpu, a, b, size, matches!(m, M::Sub | M::Cmp | M::Sbb));
+            let carry = (matches!(m, M::Adc | M::Sbb) && cpu.flags.cf) as u64;
+            let r = add_sub(cpu, a, b, size, matches!(m, M::Sub | M::Cmp | M::Sbb), carry);
             if m != M::Cmp {
                 cpu.write_op(mem, i, 0, r)?;
             }
@@ -81,14 +81,14 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             let size = dst_size(i);
             let (a, _) = cpu.read_op(mem, i, 0)?;
             let cf = cpu.flags.cf;
-            let r = add_sub(cpu, a, 1, size, m == M::Dec);
+            let r = add_sub(cpu, a, 1, size, m == M::Dec, 0);
             cpu.flags.cf = cf;
             cpu.write_op(mem, i, 0, r)?;
         }
         M::Neg => {
             let size = dst_size(i);
             let (a, _) = cpu.read_op(mem, i, 0)?;
-            let r = add_sub(cpu, 0, a, size, true);
+            let r = add_sub(cpu, 0, a, size, true, 0);
             cpu.write_op(mem, i, 0, r)?;
         }
         M::Not => {
@@ -104,16 +104,51 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 let r = match m {
                     M::Shl => a << c,
                     M::Shr => a >> c,
-                    _ => sext(a, size) >> c | 0,
+                    _ => ((sext(a, size) as i64) >> c) as u64,
                 };
-                let r = if m == M::Sar { ((sext(a, size) as i64) >> c) as u64 } else { r };
+                // 最後に押し出されたビット
                 cpu.flags.cf = match m {
                     M::Shl => (a >> (size as u64 * 8 - c)) & 1 == 1,
-                    _ => (sext(a, size) >> (c - 1)) & 1 == 1,
+                    M::Shr => (a >> (c - 1)) & 1 == 1,
+                    _ => ((sext(a, size) as i64) >> (c - 1)) & 1 == 1,
                 };
                 cpu.set_szp(r, size);
                 cpu.write_op(mem, i, 0, r & mask(size))?;
             }
+        }
+        // 回転（rol、ror）。キャリーは最後に回り込んだビット
+        M::Rol | M::Ror => {
+            let size = dst_size(i);
+            let bits = size as u64 * 8;
+            let (a, _) = cpu.read_op(mem, i, 0)?;
+            let c = (if i.op_count() > 1 { cpu.read_op(mem, i, 1)?.0 } else { 1 } & if size == 8 { 63 } else { 31 }) % bits;
+            let a = a & mask(size);
+            if c != 0 {
+                let r = if m == M::Rol { (a << c) | (a >> (bits - c)) } else { (a >> c) | (a << (bits - c)) } & mask(size);
+                cpu.flags.cf = if m == M::Rol { r & 1 == 1 } else { sign(r, size) };
+                cpu.write_op(mem, i, 0, r)?;
+            }
+        }
+        // ecx（32 ビットでは ecx）を 1 減らし、0 でなければ分岐する（フラグは変えない）
+        M::Loop | M::Loope | M::Loopne => {
+            let mut ecx = cpu.regs[1] & mask(if cpu.width == 4 { 4 } else { 8 });
+            ecx = ecx.wrapping_sub(1) & mask(if cpu.width == 4 { 4 } else { 8 });
+            cpu.regs[1] = ecx;
+            let zf = cpu.flags.zf;
+            let go = ecx != 0 && match m { M::Loope => zf, M::Loopne => !zf, _ => true };
+            if go {
+                cpu.rip = i.near_branch_target();
+            }
+        }
+        M::Jecxz | M::Jrcxz => {
+            if cpu.regs[1] & mask(if cpu.width == 4 { 4 } else { 8 }) == 0 {
+                cpu.rip = i.near_branch_target();
+            }
+        }
+        M::Bswap => {
+            let (a, size) = cpu.read_op(mem, i, 0)?;
+            let r = if size == 8 { a.swap_bytes() } else { (a as u32).swap_bytes() as u64 };
+            cpu.write_op(mem, i, 0, r)?;
         }
         M::Imul if i.op_count() >= 2 => {
             let size = dst_size(i);
@@ -147,6 +182,17 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
         // movs dword（文字列）だけは SSE の movsd と名前が重なるので Code で見分ける
         M::Movsd if i.code() == Code::Movsd_m32_m32 => string_movs_stos(cpu, mem, i, true)?,
         M::Stosb | M::Stosw | M::Stosd | M::Stosq => string_movs_stos(cpu, mem, i, false)?,
+        M::Scasb | M::Scasw | M::Scasd | M::Scasq => string_scas(cpu, mem, i)?,
+        M::Lodsb | M::Lodsw | M::Lodsd | M::Lodsq => {
+            let size = match m { M::Lodsb => 1, M::Lodsw => 2, M::Lodsq => 8, _ => 4 };
+            let count = if i.has_rep_prefix() { cpu.regs[1] } else { 1 };
+            for _ in 0..count {
+                let v = mem.read_n(cpu.regs[6], size)?;
+                cpu.set_reg(if size == 1 { iced_x86::Register::AL } else if size == 2 { iced_x86::Register::AX } else if size == 4 { iced_x86::Register::EAX } else { iced_x86::Register::RAX }, v)?;
+                cpu.regs[6] = cpu.regs[6].wrapping_add(size as u64);
+            }
+            if i.has_rep_prefix() { cpu.regs[1] = 0; }
+        }
         _ => return exec_rest(cpu, mem, i),
     }
     Ok(true)
@@ -176,10 +222,58 @@ fn string_movs_stos(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction, movs: bool
     Ok(())
 }
 
+/// scas（al/ax/eax と [edi] を比べる）。repe は等しい間、repne は等しくなるまで、ecx 回まで繰り返す。方向フラグは 0（前へ進む）
+fn string_scas(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<()> {
+    let size = match i.mnemonic() {
+        M::Scasb => 1,
+        M::Scasw => 2,
+        M::Scasq => 8,
+        _ => 4,
+    };
+    let acc = cpu.regs[0] & mask(size);
+    let repe = i.has_repe_prefix();
+    let repne = i.has_repne_prefix();
+    let rep = repe || repne;
+    let mut count = if rep { cpu.regs[1] } else { 1 };
+    while count > 0 {
+        let v = mem.read_n(cpu.regs[7], size)?;
+        add_sub(cpu, acc, v, size, true, 0); // cmp と同じにフラグを決める
+        cpu.regs[7] = cpu.regs[7].wrapping_add(size as u64);
+        count -= 1;
+        if rep {
+            cpu.regs[1] = count;
+            // repe は等しい間（zf=1）続け、repne は等しくなる（zf=1）まで続ける
+            if (repe && !cpu.flags.zf) || (repne && cpu.flags.zf) {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 残りの命令（分岐、条件つき）。exec の match の続き
 fn exec_rest(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
     let m = i.mnemonic();
     match m {
+        // pushad/popad（32 ビットだけ。eax、ecx、edx、ebx、元の esp、ebp、esi、edi の順に積む）
+        M::Pushad => {
+            let order = [0usize, 1, 2, 3, RSP, 5, 6, 7];
+            let esp = cpu.regs[RSP] & mask(4);
+            for (i, &r) in order.iter().enumerate() {
+                let v = if r == RSP { esp } else { cpu.regs[r] };
+                cpu.push(mem, v)?;
+                let _ = i;
+            }
+        }
+        M::Popad => {
+            // esp は popad では書き換えない決まり（ポップはするが捨てる）
+            for &r in [7usize, 6, 5, RSP, 3, 2, 1, 0].iter() {
+                let v = cpu.pop(mem)?;
+                if r != RSP {
+                    cpu.regs[r] = v & mask(4);
+                }
+            }
+        }
         M::Leave => {
             cpu.regs[RSP] = cpu.regs[5];
             cpu.regs[5] = cpu.pop(mem)?;

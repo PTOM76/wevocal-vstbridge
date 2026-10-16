@@ -1,6 +1,6 @@
 //! x86-64 の CPU の状態（汎用レジスタ、rip、フラグ、xmm）と、命令の引数（レジスタ、メモリ、即値）の読み書き
 use crate::mem::{Fault, Memory, R};
-use iced_x86::{ConditionCode, Instruction, OpKind, Register};
+use iced_x86::{CodeSize, ConditionCode, Instruction, OpKind, Register};
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct Flags {
@@ -11,7 +11,6 @@ pub struct Flags {
     pub pf: bool,
 }
 
-#[derive(Default)]
 pub struct Cpu {
     /// rax、rcx、rdx、rbx、rsp、rbp、rsi、rdi、r8〜r15 の順（iced の Register と同じ並び）
     pub regs: [u64; 16],
@@ -20,6 +19,16 @@ pub struct Cpu {
     pub xmm: [u128; 16],
     /// 実行した命令の数（ベンチと無限ループの見張り）
     pub steps: u64,
+    /// push、pop、call、ret が動かす幅（バイト。32 ビットの DLL なら 4、64 ビットなら 8）
+    pub width: u8,
+    /// fs セグメントの基点（32 ビットの Windows ではスレッド環境ブロック TEB。fs:[0] が SEH の鎖の先頭）
+    pub fs_base: u64,
+}
+
+impl Default for Cpu {
+    fn default() -> Self {
+        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0 }
+    }
 }
 
 pub const RSP: usize = 4;
@@ -91,6 +100,14 @@ impl Cpu {
         if index != Register::None {
             a = a.wrapping_add(self.get_reg(index)?.wrapping_mul(i.memory_index_scale() as u64));
         }
+        // fs: が付いていれば TEB の基点を足す（32 ビットの Windows の SEH など）
+        if i.segment_prefix() == Register::FS {
+            a = a.wrapping_add(self.fs_base);
+        }
+        // 32 ビットのコードの実効アドレスは 32 ビットで回り込む（負のオフセットを足したとき 2^32 を超えないように）
+        if i.code_size() == CodeSize::Code32 {
+            a &= 0xffff_ffff;
+        }
         Ok(a)
     }
 
@@ -140,13 +157,14 @@ impl Cpu {
     }
 
     pub fn push(&mut self, mem: &mut Memory, v: u64) -> R<()> {
-        self.regs[RSP] = self.regs[RSP].wrapping_sub(8);
-        mem.write_n(self.regs[RSP], 8, v)
+        let w = self.width as u64;
+        self.regs[RSP] = self.regs[RSP].wrapping_sub(w);
+        mem.write_n(self.regs[RSP], self.width as usize, v)
     }
 
     pub fn pop(&mut self, mem: &Memory) -> R<u64> {
-        let v = mem.read_n(self.regs[RSP], 8)?;
-        self.regs[RSP] = self.regs[RSP].wrapping_add(8);
+        let v = mem.read_n(self.regs[RSP], self.width as usize)?;
+        self.regs[RSP] = self.regs[RSP].wrapping_add(self.width as u64);
         Ok(v)
     }
 

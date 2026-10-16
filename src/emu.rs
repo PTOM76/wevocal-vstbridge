@@ -1,4 +1,4 @@
-//! エミュレーターの本体。DLL の関数を Windows の 64 ビットの呼び出しの決まりで呼び、終わるまで命令を実行する。
+//! エミュレーターの本体。DLL の関数を呼び、終わるまで命令を実行する（32 ビットと 64 ビットの両方に対応）。
 //! プラグインからホストへの呼び出し（コールバック、import）は「入口の番地」に来たら Rust の関数に回す
 use crate::cpu::{Cpu, RSP};
 use crate::mem::{Fault, Memory, R};
@@ -6,11 +6,13 @@ use crate::{exec, sse};
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 use std::collections::HashMap;
 
-/// 関数から戻ってきた印の番地（呼ぶときに戻り先としてスタックに積む。ここに来たら実行を止める）
-pub const RETURN_MAGIC: u64 = 0xFFFF_8000_FFFF_0000;
-/// ホストの関数の入口の番地の始まり（1 つにつき 8 ずつ。メモリは割り当てない。飛び先がここなら Rust に回す） */
-pub const THUNK_BASE: u64 = 0xFFFF_8000_0000_0000;
+/// 関数から戻ってきた印の番地（32 ビットでも 4 バイトの番地に収まる範囲。呼ぶときに戻り先としてスタックに積む）
+pub const RETURN_MAGIC: u64 = 0x4FFF_FFF0;
+/// ホストの関数の入口の番地の始まり（32 ビットの DLL でも IAT（4 バイト）に書けるよう、2^32 未満にする）
+pub const THUNK_BASE: u64 = 0x5000_0000;
 const STACK_TOP: u64 = 0x7FFF_0010_0000;
+/// 32 ビットの DLL 用のスタック（2^32 未満の番地。ESP が 32 ビットなので、ここでないと番地が入らない）
+const STACK_TOP_32: u64 = 0x7FFE_0000;
 const STACK_SIZE: usize = 1 << 20;
 /// 1 回の呼び出しで実行する命令の上限（無限ループの見張り）
 const MAX_STEPS: u64 = 50_000_000;
@@ -21,26 +23,58 @@ pub type HostFn = Box<dyn FnMut(&mut Emu) -> R<u64>>;
 pub struct Emu {
     pub cpu: Cpu,
     pub mem: Memory,
-    /// 入口の番地 → ホストの関数
-    thunks: HashMap<u64, HostFn>,
+    /// 命令を読む幅（32 または 64）
+    bits: u32,
+    /// 入口の番地 → ホストの関数と、stdcall のとき呼ばれた側が片付ける引数のバイト数（cdecl なら 0）
+    thunks: HashMap<u64, (HostFn, u64)>,
     next_thunk: u64,
+    /// LoadLibraryA で「読み込んだ」ことにした DLL の名前（ハンドルは添字に基づく）。GetProcAddress の解決に使う
+    pub loaded: Vec<String>,
+    /// GetProcAddress で作った入口の番地（DLL 名と関数名ごとに 1 つだけ作る）
+    pub procs: HashMap<(String, String), u64>,
 }
 
 impl Emu {
+    /// 64 ビットの DLL（x64）を動かすための空の状態
     pub fn new() -> Self {
+        Self::with_bits(64)
+    }
+
+    /// 32 ビットの DLL（x86）を動かすための空の状態
+    pub fn new32() -> Self {
+        Self::with_bits(32)
+    }
+
+    fn with_bits(bits: u32) -> Self {
+        let width = if bits == 32 { 4 } else { 8 };
+        let top = if bits == 32 { STACK_TOP_32 } else { STACK_TOP };
         let mut mem = Memory::new();
-        // スタック（下に伸びるので、上の番地から STACK_SIZE 分）
-        mem.map(STACK_TOP - STACK_SIZE as u64, STACK_SIZE);
-        let mut cpu = Cpu::default();
-        cpu.regs[RSP] = STACK_TOP - 0x1000;
-        Emu { cpu, mem, thunks: HashMap::new(), next_thunk: THUNK_BASE }
+        mem.map(top - STACK_SIZE as u64, STACK_SIZE);
+        let mut cpu = Cpu { width, ..Default::default() };
+        cpu.regs[RSP] = top - 0x1000;
+        if bits == 32 {
+            // スレッド環境ブロック（TEB）の最小限。fs:[0]=SEH の鎖の先頭（0xFFFFFFFF は鎖の終わり）、fs:[4]=スタックの上限、fs:[8]=下限
+            let teb = 0x7FFD_0000u64;
+            mem.map(teb, 0x1000);
+            let _ = mem.write_n(teb, 4, 0xffff_ffff);
+            let _ = mem.write_n(teb + 4, 4, top);
+            let _ = mem.write_n(teb + 8, 4, top - STACK_SIZE as u64);
+            let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
+            cpu.fs_base = teb;
+        }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new() }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
     pub fn add_thunk(&mut self, f: HostFn) -> u64 {
+        self.add_thunk_stdcall(f, 0)
+    }
+
+    /// stdcall のホスト関数。呼ばれた側（ここ）が引数を args 個ぶん片付ける（Windows の API はほとんどこれ）
+    pub fn add_thunk_stdcall(&mut self, f: HostFn, args: u64) -> u64 {
         let at = self.next_thunk;
-        self.next_thunk += 8;
-        self.thunks.insert(at, f);
+        self.next_thunk += self.cpu.width as u64;
+        self.thunks.insert(at, (f, args * self.cpu.width as u64));
         at
     }
 
@@ -48,10 +82,8 @@ impl Emu {
     /// 整数の引数は rcx、rdx、r8、r9 の順。浮動小数点は xmm0〜xmm3。5 つ目からはスタック。呼ぶ側が影の領域（32 バイト）を空ける
     pub fn call(&mut self, func: u64, args: &[Arg]) -> R<u64> {
         const IREG: [usize; 4] = [1, 2, 8, 9]; // rcx, rdx, r8, r9
-        // 5 つ目以降の引数をスタックに積む（逆順）。影の領域の分も含めて 16 バイトにそろえる
         let stack_args: Vec<&Arg> = args.iter().skip(4).collect();
         let mut rsp = self.cpu.regs[RSP];
-        // 影の領域 32 ＋ スタックの引数。呼び出し後に rsp が 16 の倍数になるよう積む
         let extra = 32 + stack_args.len() * 8;
         let total = if (extra + 8) % 16 == 0 { extra } else { extra + 8 };
         rsp -= total as u64;
@@ -66,12 +98,22 @@ impl Emu {
                 Arg::F64(f) => self.cpu.xmm[i] = f.to_bits() as u128,
             }
         }
-        // 戻り先の印を積んで実行
-        self.cpu.regs[RSP] -= 8;
-        self.mem.write_n(self.cpu.regs[RSP], 8, RETURN_MAGIC)?;
+        self.cpu.push(&mut self.mem, RETURN_MAGIC)?;
         self.cpu.rip = func;
         self.run()?;
         Ok(self.cpu.regs[0])
+    }
+
+    /// Windows x86（32 ビット）の呼び出しの決まり（cdecl）で func を呼ぶ。引数は右から左の順でスタックに積む。
+    /// 戻ったあとのスタックの後始末は、呼び出した側がすることになっているが、ここでは戻り値（eax）だけ読んで捨てるので不要
+    pub fn call32(&mut self, func: u32, args: &[Arg]) -> R<u64> {
+        for a in args.iter().rev() {
+            self.cpu.push(&mut self.mem, a.bits())?;
+        }
+        self.cpu.push(&mut self.mem, RETURN_MAGIC)?;
+        self.cpu.rip = func as u64;
+        self.run()?;
+        Ok(self.cpu.regs[0] & 0xffff_ffff)
     }
 
     /// rip から命令を実行する。戻りの印に来たら止める。ホストの入口に飛んだらその関数を呼ぶ
@@ -81,13 +123,14 @@ impl Emu {
             if rip == RETURN_MAGIC {
                 return Ok(());
             }
-            // ホストの関数の入口か（call でここへ飛ぶと、戻り先はスタックの先頭にある）
-            if rip >= THUNK_BASE && rip < self.next_thunk {
+            if self.thunks.contains_key(&rip) {
                 let ret = self.cpu.pop(&self.mem)?;
-                let mut f = self.thunks.remove(&rip).ok_or_else(|| Fault(format!("thunk {rip:#x}")))?;
+                let (mut f, pop) = self.thunks.remove(&rip).ok_or_else(|| Fault(format!("thunk {rip:#x}")))?;
                 let rax = f(self);
-                self.thunks.insert(rip, f);
+                self.thunks.insert(rip, (f, pop));
                 self.cpu.regs[0] = rax?;
+                // stdcall は、呼ばれた側が引数を片付ける（ret N と同じ）
+                self.cpu.regs[RSP] = self.cpu.regs[RSP].wrapping_add(pop);
                 self.cpu.rip = ret;
                 continue;
             }
@@ -103,14 +146,21 @@ impl Emu {
     fn step(&mut self) -> R<()> {
         let rip = self.cpu.rip;
         let bytes = self.mem.fetch(rip, 16)?;
-        let mut dec = Decoder::with_ip(64, bytes, rip, DecoderOptions::NONE);
+        let mut dec = Decoder::with_ip(self.bits, bytes, rip, DecoderOptions::NONE);
         let insn = dec.decode();
         if insn.is_invalid() {
             return Err(Fault(format!("decode {rip:#x}")));
         }
-        // 既定では次の命令へ進める。分岐の命令は exec の中で rip を書き換える
+        if std::env::var("VSTBRIDGE_TRACE").is_ok() {
+            let r = &self.cpu.regs;
+            let top = self.mem.read_n(r[4], 4).unwrap_or(0xdead_dead);
+            eprintln!(
+                "{:#x}: {:<28} eax={:08x} ecx={:08x} edx={:08x} ebx={:08x} esp={:08x} ebp={:08x} esi={:08x} edi={:08x} [esp]={:08x}",
+                rip, insn.to_string(), r[0] as u32, r[1] as u32, r[2] as u32, r[3] as u32, r[4] as u32, r[5] as u32, r[6] as u32, r[7] as u32, top as u32
+            );
+        }
         self.cpu.rip = insn.next_ip();
-        self.run_insn(&insn)
+        self.run_insn(&insn).map_err(|e| Fault(format!("{} (at {rip:#x}: {insn})", e.0)))
     }
 
     fn run_insn(&mut self, insn: &Instruction) -> R<()> {

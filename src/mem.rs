@@ -16,14 +16,18 @@ pub struct Memory {
     regions: Vec<Region>,
     /// ホストが使う領域（バッファなど）の次の割り当て先
     heap_next: u64,
+    /// 32 ビットのプラグイン向けの割り当て先（番地が 2^32 未満に収まる範囲）
+    heap_next32: u64,
 }
 
 /// ホストが確保する領域の始まり（プラグインの DLL やスタックとぶつからない所）
 pub const HEAP_BASE: u64 = 0x6000_0000_0000;
+/// 32 ビットのプラグイン向け。DLL の既定の読み込み先（0x10000000 あたり）やスタック（0x7FFE0000）より低くも高くもない空き
+pub const HEAP_BASE_32: u64 = 0x6000_0000;
 
 impl Memory {
     pub fn new() -> Self {
-        Memory { regions: Vec::new(), heap_next: HEAP_BASE }
+        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32 }
     }
 
     /// start から size バイトを 0 で割り当てる
@@ -38,6 +42,15 @@ impl Memory {
         self.map(at, size.max(16));
         self.heap_next += size.max(16) as u64 + 16;
         at
+    }
+
+    /// 32 ビットのプラグインに渡せる番地（2^32 未満）で確保する
+    pub fn alloc32(&mut self, size: usize) -> u32 {
+        let at = self.heap_next32;
+        let size = (size + 15) & !15;
+        self.map(at, size.max(16));
+        self.heap_next32 += size.max(16) as u64 + 16;
+        at as u32
     }
 
     fn find(&self, addr: u64, len: usize) -> R<(usize, usize)> {
