@@ -1,17 +1,15 @@
 # WeVocalVstBridge
-WeVocalVstBridge は、Windows 向けの VST プラグイン（DLL）を、x86-64 のエミュレーターで動かすための研究用のライブラリである。最終的には wasm にして、iPad の PWA（Safari）の中で VST を直接動かすことを目指す。
+WeVocalVstBridge は、Windows 向けの VST プラグイン（DLL）を、x86-64 のエミュレーターで動かすためのライブラリである。最終的には wasm にして、PWA（ブラウザ）の中で VST を直接動かすことを目指す。
 
-WeVocal Studio と WeVocalSynth の試験的機能（WeVocal プラグインの「VST を読み込む」）のために作っている。**研究の段階**で、まだ実用にはならない。
+WeVocal Studio と WeVocalSynth で VST を読み込むための実行環境として作っている。開発中で、まだ実用にはならない。
 
-## 目的
+## 特徴
 | 項目 | 内容 |
 | --- | --- |
-| 動かす場所 | PC に処理を任せず、iPad のブラウザの中で、利用者が指定した VST を動かす |
+| 動かす場所 | PC に処理を任せず、ブラウザの中で、利用者が指定した VST を動かす |
 | 作り方 | Windows を丸ごとまねず、1 つの VST を動かすのに要る機能（PE の読み込み、要る API、VST の窓口、音の処理）に絞る |
 | 速さ | 先読みで鳴らすリアルタイムを目指す。間に合わないものは書き出し専用に落とす |
 | 本体とのつなぎ方 | WeVocal プラグイン（`format: "vst"`）の形だけ。本体の中には触れない |
-
-設計と背景は、WeVocal Studio の `memo/effects.md`（6 章、7 章）にある。
 
 ## 今の状態
 x64 の PE（DLL）を読み込み、命令を 1 つずつ実行して、VST2 の `processReplacing` を通すところまでを作っている途中である。
@@ -55,11 +53,6 @@ gcc -O2 -o host.exe host.c
 ```
 
 `host.exe` は、ネイティブの Windows で DLL を動かし、1 kHz の正弦波を通した結果と、名前、つまみの値を表示する。エミュレーターの結果は、これと比べる。
-
-## ドキュメント
-| ドキュメント名 | リンク先 |
-| --- | --- |
-| 引き継ぎ（進め方と次にやること） | [HANDOFF.md](HANDOFF.md) |
 
 ## License
 This project is licensed under the Mozilla Public License 2.0 (MPL-2.0).
