@@ -1,7 +1,7 @@
 //! Windows の DLL（PE、64 ビット）を読み込み、セクションをメモリに置く。書き出し（export）の番地を引ける
 use crate::mem::{Fault, Memory, R};
 use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile64};
-use object::{LittleEndian as LE, Object, ObjectSymbol};
+use object::{LittleEndian as LE, Object};
 
 pub struct Image {
     pub base: u64,

@@ -1,14 +1,9 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+//! Windows の VST プラグイン（DLL）を、x86-64 のエミュレーターでブラウザ（wasm）でも動かすための研究用のライブラリ。
+//! HANDOFF.md と、WeVocal Studio の memo/effects.md の 6 章を参照
+pub mod cpu;
+pub mod emu;
+pub mod exec;
+pub mod mem;
+pub mod pe;
+pub mod sse;
+pub mod vst;

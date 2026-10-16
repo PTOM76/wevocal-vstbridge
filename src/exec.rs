@@ -1,7 +1,7 @@
 //! 整数の命令を 1 つ実行する（データの移動、四則演算、比較、分岐、呼び出し）。SSE は sse.rs
 use crate::cpu::{mask, sext, sign, Cpu, RSP};
 use crate::mem::{Fault, Memory, R};
-use iced_x86::{Instruction, Mnemonic as M, OpKind};
+use iced_x86::{Code, ConditionCode, Instruction, Mnemonic as M, OpKind};
 
 /// 引数 0 の大きさ（バイト）
 fn dst_size(i: &Instruction) -> usize {
@@ -142,6 +142,44 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             let v = cpu.pop(mem)?;
             cpu.write_op(mem, i, 0, v)?;
         }
+        // 文字列のコピー（movs）と書き込み（stos）。rep が付けば rcx 回繰り返す。方向フラグ（df）は 0 として扱う（前へ進む）
+        M::Movsb | M::Movsw | M::Movsq => string_movs_stos(cpu, mem, i, true)?,
+        // movs dword（文字列）だけは SSE の movsd と名前が重なるので Code で見分ける
+        M::Movsd if i.code() == Code::Movsd_m32_m32 => string_movs_stos(cpu, mem, i, true)?,
+        M::Stosb | M::Stosw | M::Stosd | M::Stosq => string_movs_stos(cpu, mem, i, false)?,
+        _ => return exec_rest(cpu, mem, i),
+    }
+    Ok(true)
+}
+
+/// movs（コピー）と stos（書き込み）。rep が付けば rcx 回。方向フラグは 0（前へ進む）として扱う
+fn string_movs_stos(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction, movs: bool) -> R<()> {
+    let m = i.mnemonic();
+    let size = match m {
+        M::Movsb | M::Stosb => 1,
+        M::Movsw | M::Stosw => 2,
+        M::Movsq | M::Stosq => 8,
+        _ => 4,
+    };
+    let count = if i.has_rep_prefix() { cpu.regs[1] } else { 1 };
+    for _ in 0..count {
+        let v = if movs { mem.read_n(cpu.regs[6], size)? } else { cpu.regs[0] & mask(size) };
+        mem.write_n(cpu.regs[7], size, v)?; // rdi
+        if movs {
+            cpu.regs[6] = cpu.regs[6].wrapping_add(size as u64); // rsi
+        }
+        cpu.regs[7] = cpu.regs[7].wrapping_add(size as u64);
+    }
+    if i.has_rep_prefix() {
+        cpu.regs[1] = 0;
+    }
+    Ok(())
+}
+
+/// 残りの命令（分岐、条件つき）。exec の match の続き
+fn exec_rest(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
+    let m = i.mnemonic();
+    match m {
         M::Leave => {
             cpu.regs[RSP] = cpu.regs[5];
             cpu.regs[5] = cpu.pop(mem)?;
@@ -158,19 +196,25 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 cpu.regs[RSP] = cpu.regs[RSP].wrapping_add(i.immediate(0));
             }
         }
-        _ if i.is_jcc_short_or_near() => {
-            if cpu.cond(i.condition_code()) {
-                cpu.rip = i.near_branch_target();
+        // 条件つきの命令（jcc、setcc、cmovcc）。引数の形で見分ける
+        _ if i.condition_code() != ConditionCode::None => {
+            let take = cpu.cond(i.condition_code());
+            match i.op_kind(0) {
+                // jcc（飛び先が分岐の番地）
+                OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
+                    if take {
+                        cpu.rip = i.near_branch_target();
+                    }
+                }
+                // cmovcc（引数が 2 つ）か setcc（引数が 1 つ）
+                _ if i.op_count() == 2 => {
+                    let (v, _) = cpu.read_op(mem, i, 1)?;
+                    if take {
+                        cpu.write_op(mem, i, 0, v)?;
+                    }
+                }
+                _ => cpu.write_op(mem, i, 0, take as u64)?,
             }
-        }
-        _ if i.is_setcc() => {
-            let v = cpu.cond(i.condition_code()) as u64;
-            cpu.write_op(mem, i, 0, v)?;
-        }
-        _ if i.is_cmovcc() => {
-            let (v, _) = cpu.read_op(mem, i, 1)?;
-            let (old, _) = cpu.read_op(mem, i, 0)?;
-            cpu.write_op(mem, i, 0, if cpu.cond(i.condition_code()) { v } else { old })?;
         }
         _ => return Ok(false),
     }
