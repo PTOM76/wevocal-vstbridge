@@ -1,5 +1,6 @@
 // ブリッジの成果物（wasm、JS のグルー、worklet 用に加工したグルー）を、wevocal-lib の web/src/plugins/vst/ に書き出す。
 // 使い方: ./build-wasm.sh のあとに node scripts/export-to-lib.mjs <wevocal-lib のフォルダー>
+// node scripts/export-to-lib.mjs ../wevocalsynth/wevocal-lib/
 import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
