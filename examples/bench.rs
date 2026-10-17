@@ -23,6 +23,7 @@ fn main() {
     }
     let run = t1.elapsed();
     let steps = v.emu.cpu.steps - load_steps;
+    println!("fpu_depth = {}", v.emu.cpu.fpu_depth);
     println!("読み込み {:.2} 秒（{} 命令）", load.as_secs_f64(), load_steps);
     if let Some(p) = &v.emu.prof {
         let mut rows: Vec<_> = p.iter().collect();

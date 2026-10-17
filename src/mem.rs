@@ -25,6 +25,8 @@ fn block_mask(off: usize, len: usize) -> u64 {
     hi & !((1u64 << a) - 1)
 }
 const PAGE_BITS: u32 = 12;
+/// alloc32 が一度に確保する領域の大きさ
+const ARENA: usize = 1 << 20;
 const PAGE: usize = 1 << PAGE_BITS;
 /// 32 ビットの番地空間のページ数
 const PAGES: usize = 1 << (32 - PAGE_BITS);
@@ -34,6 +36,8 @@ pub struct Memory {
     regions: Vec<Region>,
     /// ホストが使う領域（バッファなど）の次の割り当て先
     heap_next: u64,
+    /// アリーナの終わり（alloc32 の領域の、使える範囲の終わり）
+    arena_end: u64,
     /// 32 ビットのプラグイン向けの割り当て先（番地が 2^32 未満に収まる範囲）
     heap_next32: u64,
     /// 直前に当たった領域の添字（読み書きと命令の取得は、同じ領域に続けて当たることが多いので、まずここを調べる）
@@ -58,7 +62,7 @@ pub const HEAP_BASE_32: u64 = 0x6000_0000;
 
 impl Memory {
     pub fn new() -> Self {
-        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32, last_data: Default::default(), last_code: Default::default(), order: Vec::new(), pages: vec![0; PAGES], code_pages: vec![Default::default(); PAGES], watch_oob: std::env::var("VSTBRIDGE_OOB").is_ok(), code_dirty: false }
+        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32, last_data: Default::default(), last_code: Default::default(), order: Vec::new(), arena_end: 0, pages: vec![0; PAGES], code_pages: vec![Default::default(); PAGES], watch_oob: std::env::var("VSTBRIDGE_OOB").is_ok(), code_dirty: false }
     }
 
     /// start から size バイトを 0 で割り当てる
@@ -101,6 +105,20 @@ impl Memory {
 
     /// 32 ビットのプラグインに渡せる番地（2^32 未満）で確保する
     pub fn alloc32(&mut self, size: usize) -> u32 {
+        if !self.watch_oob {
+            // 小さいブロックは、ページに揃えた大きな領域（アリーナ）から切り出す（領域が 4KB ページ全体を覆うので、読み書きの近道が使える）
+            let need = ((size + 15) & !15) as u64 + 16;
+            if self.heap_next32 + need > self.arena_end {
+                let start = (self.heap_next32 + PAGE as u64 - 1) & !(PAGE as u64 - 1);
+                let chunk = ((need as usize).max(ARENA) + PAGE - 1) & !(PAGE - 1);
+                self.map(start, chunk);
+                self.heap_next32 = start;
+                self.arena_end = start + chunk as u64;
+            }
+            let at = self.heap_next32;
+            self.heap_next32 += need;
+            return at as u32;
+        }
         let want = size;
         // 大きいブロックはページに合わせる（読み書きの近道が使える）
         let big = size >= 2 * PAGE;
