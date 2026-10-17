@@ -165,7 +165,8 @@ impl Memory {
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> R<()> {
         let off = (addr & (PAGE as u64 - 1)) as usize;
         if addr >> 32 == 0 && off + buf.len() <= PAGE {
-            let p = self.pages[(addr >> PAGE_BITS) as usize];
+            // SAFETY: addr < 2^32 なので添字は pages の長さ未満
+            let p = unsafe { *self.pages.get_unchecked((addr >> PAGE_BITS) as usize) };
             if p != 0 {
                 // SAFETY: p は領域のデータ（Vec は動かない）の中のページの先頭で、off + len はページに収まる
                 unsafe { std::ptr::copy_nonoverlapping((p + off) as *const u8, buf.as_mut_ptr(), buf.len()) };
@@ -262,7 +263,8 @@ impl Memory {
     pub fn read_u32(&self, addr: u64) -> R<u32> {
         let off = (addr & (PAGE as u64 - 1)) as usize;
         if addr >> 32 == 0 && off <= PAGE - 4 {
-            let p = self.pages[(addr >> PAGE_BITS) as usize];
+            // SAFETY: addr < 2^32 なので添字は pages の長さ未満
+            let p = unsafe { *self.pages.get_unchecked((addr >> PAGE_BITS) as usize) };
             if p != 0 {
                 // SAFETY: p + off は領域のデータの中（ページ全体が領域に収まっている）で、4 バイト読める
                 return Ok(unsafe { ((p + off) as *const u32).read_unaligned() });
@@ -275,7 +277,8 @@ impl Memory {
     pub fn read_u64(&self, addr: u64) -> R<u64> {
         let off = (addr & (PAGE as u64 - 1)) as usize;
         if addr >> 32 == 0 && off <= PAGE - 8 {
-            let p = self.pages[(addr >> PAGE_BITS) as usize];
+            // SAFETY: addr < 2^32 なので添字は pages の長さ未満
+            let p = unsafe { *self.pages.get_unchecked((addr >> PAGE_BITS) as usize) };
             if p != 0 {
                 // SAFETY: read_u32 と同じ
                 return Ok(unsafe { ((p + off) as *const u64).read_unaligned() });

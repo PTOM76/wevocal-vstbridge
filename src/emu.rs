@@ -34,7 +34,7 @@ impl std::hash::Hasher for FastHasher {
 }
 pub type FastHash = std::hash::BuildHasherDefault<FastHasher>;
 
-const MAX_STEPS: u64 = 50_000_000;
+pub const MAX_STEPS: u64 = 50_000_000;
 
 /// ホストの関数。引数はレジスタとスタックから自分で読み、戻り値（rax に入れる）を返す
 pub type HostFn = Box<dyn FnMut(&mut Emu) -> R<u64>>;
@@ -56,13 +56,14 @@ pub struct Emu {
     /// x87 で最初に NaN になる命令を見張る（環境変数 VSTBRIDGE_NAN があるときだけ）
     nan_watch: bool,
     /// この呼び出しが始まったときの命令数（無限ループの見張りは、呼び出しごとに数える）
-    call_start: u64,
+    pub(crate) call_start: u64,
     /// 全命令とレジスタを出す（環境変数 VSTBRIDGE_TRACE。毎命令は読まないよう、作るときに 1 度だけ読む）
     trace: bool,
     /// デコード済みの命令（番地 → 命令）。コードが書き換わる（自己展開が終わったあと）ことはないとみなす。展開が終わってから使うため、書き込みで無効にする
     decoded: HashMap<u64, (Instruction, Op), FastHash>,
     /// 前もって解いた形（fast.rs）を使うか（トレースや調査のときは使わない）
     use_fast: bool,
+    pub(crate) blocks: crate::blocks::Blocks,
     /// 命令ごとの回数と時間（VSTBRIDGE_PROF=1。調査用）
     pub prof: Option<HashMap<u32, (u64, u64)>>,
 }
@@ -95,7 +96,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_PROF").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -149,23 +150,46 @@ impl Emu {
         Ok(self.cpu.regs[0] & 0xffff_ffff)
     }
 
+    /// rip がホストの関数の入口なら、それを呼んで戻り先へ進める（true）。そうでなければ false
+    pub(crate) fn try_thunk(&mut self, rip: u64) -> R<bool> {
+        if rip >= THUNK_BASE && rip < self.next_thunk && self.thunks.contains_key(&rip) {
+            let ret = self.cpu.pop(&self.mem)?;
+            let (mut f, pop) = self.thunks.remove(&rip).ok_or_else(|| Fault(format!("thunk {rip:#x}")))?;
+            let rax = f(self);
+            self.thunks.insert(rip, (f, pop));
+            self.cpu.regs[0] = rax?;
+            // stdcall は、呼ばれた側が引数を片付ける（ret N と同じ）
+            self.cpu.regs[RSP] = self.cpu.regs[RSP].wrapping_add(pop);
+            self.cpu.rip = ret;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn next_thunk(&self) -> u64 {
+        self.next_thunk
+    }
+
+    pub(crate) fn bits(&self) -> u32 {
+        self.bits
+    }
+
+    pub(crate) fn decoded_clear(&mut self) {
+        self.decoded.clear();
+    }
+
     /// rip から命令を実行する。戻りの印に来たら止める。ホストの入口に飛んだらその関数を呼ぶ
     fn run(&mut self) -> R<()> {
+        if self.use_fast && self.bits == 32 {
+            return self.run_blocks();
+        }
         self.call_start = self.cpu.steps;
         loop {
             let rip = self.cpu.rip;
             if rip == RETURN_MAGIC {
                 return Ok(());
             }
-            if rip >= THUNK_BASE && rip < self.next_thunk && self.thunks.contains_key(&rip) {
-                let ret = self.cpu.pop(&self.mem)?;
-                let (mut f, pop) = self.thunks.remove(&rip).ok_or_else(|| Fault(format!("thunk {rip:#x}")))?;
-                let rax = f(self);
-                self.thunks.insert(rip, (f, pop));
-                self.cpu.regs[0] = rax?;
-                // stdcall は、呼ばれた側が引数を片付ける（ret N と同じ）
-                self.cpu.regs[RSP] = self.cpu.regs[RSP].wrapping_add(pop);
-                self.cpu.rip = ret;
+            if self.try_thunk(rip)? {
                 continue;
             }
             self.step()?;
@@ -214,9 +238,9 @@ impl Emu {
         }
         self.cpu.rip = insn.next_ip();
         if self.prof.is_some() {
-            let t = unsafe { core::arch::x86_64::_rdtsc() };
+            let t = tsc();
             let r = self.run_insn(&insn);
-            let d = unsafe { core::arch::x86_64::_rdtsc() } - t;
+            let d = tsc() - t;
             let e = self.prof.as_mut().unwrap().entry(insn.mnemonic() as u32).or_insert((0, 0));
             e.0 += 1;
             e.1 += d;
@@ -225,7 +249,7 @@ impl Emu {
         self.run_insn(&insn).map_err(|e| Fault(format!("{} (at {rip:#x}: {insn})", e.0)))
     }
 
-    fn run_insn(&mut self, insn: &Instruction) -> R<()> {
+    pub(crate) fn run_insn(&mut self, insn: &Instruction) -> R<()> {
         // x87（F2xm1〜Fyl2xp1 の範囲）が大半のコード（古いリバーブやフィルター）では、整数と SSE の判定を 2 回通るのが無駄なので、先に x87 を試す。
         // 範囲の外の命令は、整数 → SSE の順（x87 は飛ばす）
         let m = insn.mnemonic() as u32;
@@ -277,4 +301,14 @@ impl Arg {
             Arg::F64(f) => f.to_bits(),
         }
     }
+}
+
+/// 調査用の時刻（CPU のサイクル。x86_64 以外では 0）
+#[cfg(target_arch = "x86_64")]
+fn tsc() -> u64 {
+    unsafe { core::arch::x86_64::_rdtsc() }
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn tsc() -> u64 {
+    0
 }
