@@ -43,7 +43,11 @@ pub fn arg_count(name: &str) -> u64 {
 
 /// 知っている import なら、その振る舞いのホスト関数を返す（dll の大文字小文字は気にしない）
 pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
-    let dll = dll.to_ascii_uppercase();
+    let mut dll = dll.to_ascii_uppercase();
+    // API セット（api-ms-win-core-…）と KERNELBASE の関数は KERNEL32 と同じものとして扱う（新しい C のランタイムは GetProcAddress でこちらから引く）
+    if dll.starts_with("API-MS-WIN-") || dll.starts_with("KERNELBASE") {
+        dll = "KERNEL32.DLL".into();
+    }
     match (dll.as_str(), name) {
         // LoadLibrary(name)。本物の読み込みはせず、名前を覚えて偽のハンドルを返す（GetProcAddress で名前に戻す）
         ("KERNEL32.DLL", "LoadLibraryA" | "LoadLibraryExA") => Some(Box::new(|e: &mut Emu| -> R<u64> {

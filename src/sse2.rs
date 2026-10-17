@@ -87,6 +87,25 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 true
             }
             M::Ldmxcsr => true,
+            // fxsave と fxrstor（512 バイト）。x87 の状態は既定の制御語だけを書き、xmm だけを保存して戻す
+            M::Fxsave | M::Fxsave64 => {
+                let a = cpu.addr(i)?;
+                mem.write(a, &[0u8; 512])?;
+                mem.write_n(a, 2, 0x037f)?;
+                mem.write_n(a + 24, 4, 0x1f80)?;
+                mem.write_n(a + 28, 4, 0xffbf)?;
+                for k in 0..16 {
+                    mem.write_u128(a + 160 + k * 16, cpu.xmm[k as usize])?;
+                }
+                true
+            }
+            M::Fxrstor | M::Fxrstor64 => {
+                let a = cpu.addr(i)?;
+                for k in 0..16 {
+                    cpu.xmm[k as usize] = mem.read_u128(a + 160 + k * 16)?;
+                }
+                true
+            }
             M::Movntps | M::Movntdq | M::Movntpd => {
                 let v = cpu.read_xmm_op(mem, i, 1)?;
                 let a = cpu.addr(i)?;
@@ -255,6 +274,29 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             s | (s << 64)
         }
         M::Movntps | M::Movntdq | M::Movntpd | M::Lddqu => src(cpu, mem)?,
+        // SSE3
+        M::Movsldup | M::Movshdup => {
+            let x = lanes(src(cpu, mem)?, 32);
+            let o = if m == M::Movsldup { 0 } else { 1 };
+            join(&[x[o], x[o], x[2 + o], x[2 + o]], 32)
+        }
+        M::Haddps | M::Hsubps => {
+            let (a, b) = (f32s(d), f32s(src(cpu, mem)?));
+            let f = |x: f32, y: f32| if m == M::Haddps { x + y } else { x - y };
+            from_f32s([f(a[0], a[1]), f(a[2], a[3]), f(b[0], b[1]), f(b[2], b[3])])
+        }
+        M::Haddpd | M::Hsubpd => {
+            let (a, b) = (f64s(d), f64s(src(cpu, mem)?));
+            from_f64s(if m == M::Haddpd { [a[0] + a[1], b[0] + b[1]] } else { [a[0] - a[1], b[0] - b[1]] })
+        }
+        M::Addsubps => {
+            let (a, b) = (f32s(d), f32s(src(cpu, mem)?));
+            from_f32s([a[0] - b[0], a[1] + b[1], a[2] - b[2], a[3] + b[3]])
+        }
+        M::Addsubpd => {
+            let (a, b) = (f64s(d), f64s(src(cpu, mem)?));
+            from_f64s([a[0] - b[0], a[1] + b[1]])
+        }
         // f32 の packed
         M::Minps | M::Maxps => {
             let (a, b) = (f32s(d), f32s(src(cpu, mem)?));

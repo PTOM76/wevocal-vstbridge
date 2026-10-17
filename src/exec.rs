@@ -35,7 +35,8 @@ fn logic(cpu: &mut Cpu, r: u64, size: usize) -> u64 {
 pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
     let m = i.mnemonic();
     match m {
-        M::Nop | M::Endbr64 => {}
+        // スレッドは 1 つなので、メモリの順序の命令と先読みの指示は何もしない
+        M::Nop | M::Endbr64 | M::Sfence | M::Lfence | M::Mfence | M::Prefetcht0 | M::Prefetcht1 | M::Prefetcht2 | M::Prefetchnta | M::Prefetchw | M::Pause => {}
         M::Int3 => return Err(Fault("int3".into())),
         M::Mov => {
             let (v, _) = cpu.read_op(mem, i, 1)?;
@@ -293,11 +294,16 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             cpu.write_op(mem, i, 0, v)?;
         }
         // 文字列のコピー（movs）と書き込み（stos）。rep が付けば rcx 回繰り返す。方向フラグ（df）は 0 として扱う（前へ進む）
+        // df は常に 0 として扱うので、cld は何もしない
+        M::Cld => {}
         M::Movsb | M::Movsw | M::Movsq => string_movs_stos(cpu, mem, i, true)?,
         // movs dword（文字列）だけは SSE の movsd と名前が重なるので Code で見分ける
         M::Movsd if i.code() == Code::Movsd_m32_m32 => string_movs_stos(cpu, mem, i, true)?,
         M::Stosb | M::Stosw | M::Stosd | M::Stosq => string_movs_stos(cpu, mem, i, false)?,
         M::Scasb | M::Scasw | M::Scasd | M::Scasq => string_scas(cpu, mem, i)?,
+        // cmpsd は SSE の同じ名前の命令（引数が xmm）と分ける
+        M::Cmpsb | M::Cmpsw | M::Cmpsq => string_cmps(cpu, mem, i)?,
+        M::Cmpsd if i.op_kind(0) != OpKind::Register => string_cmps(cpu, mem, i)?,
         M::Lodsb | M::Lodsw | M::Lodsd | M::Lodsq => {
             let size = match m { M::Lodsb => 1, M::Lodsw => 2, M::Lodsq => 8, _ => 4 };
             let count = if i.has_rep_prefix() { cpu.regs[1] } else { 1 };
@@ -434,5 +440,33 @@ fn branch_target(cpu: &Cpu, mem: &Memory, i: &Instruction) -> R<u64> {
     match i.op_kind(0) {
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => Ok(i.near_branch_target()),
         _ => Ok(cpu.read_op(mem, i, 0)?.0),
+    }
+}
+
+/// cmps（[rsi] と [rdi] を比べる）。repe は等しい間、repne は違う間、rcx 回まで繰り返す。方向フラグは 0（前へ進む）
+fn string_cmps(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<()> {
+    let size = match i.mnemonic() {
+        M::Cmpsb => 1,
+        M::Cmpsw => 2,
+        M::Cmpsq => 8,
+        _ => 4,
+    };
+    let rep = i.has_repe_prefix() || i.has_repne_prefix();
+    if rep && cpu.regs[1] == 0 {
+        return Ok(());
+    }
+    loop {
+        let a = mem.read_n(cpu.regs[6], size)?;
+        let b = mem.read_n(cpu.regs[7], size)?;
+        add_sub(cpu, a, b, size, true, 0);
+        cpu.regs[6] = cpu.regs[6].wrapping_add(size as u64);
+        cpu.regs[7] = cpu.regs[7].wrapping_add(size as u64);
+        if !rep {
+            return Ok(());
+        }
+        cpu.regs[1] -= 1;
+        if cpu.regs[1] == 0 || (i.has_repe_prefix() && !cpu.flags.zf) || (i.has_repne_prefix() && cpu.flags.zf) {
+            return Ok(());
+        }
     }
 }

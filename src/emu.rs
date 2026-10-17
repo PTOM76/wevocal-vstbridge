@@ -37,6 +37,8 @@ pub type FastHash = std::hash::BuildHasherDefault<FastHasher>;
 /// call32 などが「途中で中断した」ときのエラーの文（Fault の中身）。画面の入力待ちのループで使う（gui.rs）
 pub const YIELD: &str = "yield";
 pub const MAX_STEPS: u64 = 50_000_000;
+/// 読み込み（初期化）のときの上限。大きなプラグインは表の計算（FFT など）に数十億命令かかる
+pub const LOAD_MAX_STEPS: u64 = 20_000_000_000;
 
 /// ホストの関数。引数はレジスタとスタックから自分で読み、戻り値（rax に入れる）を返す
 pub type HostFn = Box<dyn Fn(&mut Emu) -> R<u64>>;
@@ -57,6 +59,8 @@ pub struct Emu {
     pub heap_sizes: HashMap<u64, usize>,
     /// 読み込んだ DLL の番地（GetModuleHandle(NULL) などで返す。0 なら 32 ビットの既定）
     pub image_base: u64,
+    /// 1 回の呼び出しの命令数の上限（無限ループで止まらないように）
+    pub max_steps: u64,
     /// x87 で最初に NaN になる命令を見張る（環境変数 VSTBRIDGE_NAN があるときだけ）
     nan_watch: bool,
     /// この呼び出しが始まったときの命令数（無限ループの見張りは、呼び出しごとに数える）
@@ -113,7 +117,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x60, 8, teb + 0x1000);
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -225,8 +229,8 @@ impl Emu {
             self.step()?;
             self.cpu.steps += 1;
             // 1 回の呼び出しの中での命令数の上限（累積ではなく、この呼び出しが始まってからの数）
-            if self.cpu.steps - self.call_start > MAX_STEPS {
-                return Err(Fault("step limit".into()));
+            if self.cpu.steps - self.call_start > self.max_steps {
+                return Err(Fault(format!("step limit (rip={:#x})", self.cpu.rip)));
             }
         }
     }

@@ -16,6 +16,10 @@ mod off {
 }
 
 const VST_MAGIC: u64 = 0x5673_7450; // 'VstP'
+const EFF_OPEN: u64 = 0;
+const EFF_SET_SAMPLE_RATE: u64 = 10;
+const EFF_SET_BLOCK_SIZE: u64 = 11;
+const EFF_MAINS_CHANGED: u64 = 12;
 const EFF_GET_PARAM_NAME: u64 = 8;
 const EFF_GET_EFFECT_NAME: u64 = 45;
 
@@ -42,6 +46,7 @@ impl Vst {
     /// DLL のバイト列から読み込み、VSTPluginMain を呼んで AEffect を受け取る
     pub fn load(dll: &[u8]) -> R<Vst> {
         let mut emu = Emu::new();
+        emu.max_steps = crate::emu::LOAD_MAX_STEPS;
         let img = pe::load(&mut emu.mem, dll)?;
         emu.image_base = img.base;
         emu.gui.base = img.base;
@@ -74,7 +79,14 @@ impl Vst {
         let num_params = emu.mem.read_n(effect + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect + off::NUM_OUTPUTS, 4)? as i32;
-        Ok(Vst { emu, effect, num_params, num_inputs, num_outputs, io: None })
+        let mut v = Vst { emu, effect, num_params, num_inputs, num_outputs, io: None };
+        // ホストと同じ手順で使える状態にする（32 ビット版の vst32.rs と同じ。JUCE などは resume されるまで処理を始めない）
+        v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
+        v.dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 0, 48000.0)?;
+        v.dispatch(EFF_SET_BLOCK_SIZE, 0, 2048, 0, 0.0)?;
+        v.dispatch(EFF_MAINS_CHANGED, 0, 1, 0, 0.0)?;
+        v.emu.max_steps = crate::emu::MAX_STEPS;
+        Ok(v)
     }
 
     fn ptr(&self, field: u64) -> R<u64> {
@@ -103,6 +115,15 @@ impl Vst {
         self.emu.call(dispatcher, &[Arg::Int(self.effect), Arg::Int(EFF_GET_PARAM_NAME), Arg::Int(index as u64), Arg::Int(0), Arg::Int(buf), Arg::F32(0.0)])?;
         let name = self.emu.mem.read_cstr(buf, 64)?;
         Ok(if name.is_empty() { format!("Param {index}") } else { name })
+    }
+
+    /// dispatcher(effect, opcode, index, value, ptr, opt) を呼ぶ
+    pub fn dispatch(&mut self, opcode: u64, index: u64, value: u64, ptr: u64, opt: f32) -> R<u64> {
+        let f = self.ptr(off::DISPATCHER)?;
+        if f == 0 {
+            return Ok(0);
+        }
+        self.emu.call(f, &[Arg::Int(self.effect), Arg::Int(opcode), Arg::Int(index), Arg::Int(value), Arg::Int(ptr), Arg::F32(opt)])
     }
 
     pub fn set_param(&mut self, index: i32, value: f32) -> R<()> {

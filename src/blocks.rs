@@ -153,8 +153,8 @@ impl Emu {
                 }
             }
             self.cpu.steps += done;
-            if self.cpu.steps - self.call_start > crate::emu::MAX_STEPS {
-                return Err(Fault("step limit".into()));
+            if self.cpu.steps - self.call_start > self.max_steps {
+                return Err(Fault(format!("step limit (rip={:#x})", self.cpu.rip)));
             }
         }
     }
