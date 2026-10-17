@@ -1,0 +1,3 @@
+# wasm の関数の表を伸ばせるようにする（JIT が生成した関数を足すため。src/jit/install.rs）
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--growable-table"]

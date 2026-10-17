@@ -9,6 +9,7 @@ pub mod gdi;
 pub mod gui;
 pub mod gui_api;
 pub mod host_stubs;
+pub mod jit;
 #[cfg(target_arch = "wasm32")]
 pub mod js;
 pub mod mem;

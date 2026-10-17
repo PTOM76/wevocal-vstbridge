@@ -175,3 +175,9 @@ impl JsVst {
         }
     }
 }
+
+/// JIT のつなぎ方の確かめ（引数に 42 を足して返す）
+#[wasm_bindgen(js_name = jitSelftest)]
+pub fn jit_selftest(x: u32) -> Result<u32, JsError> {
+    crate::jit::selftest(x).map_err(|e| JsError::new(&e))
+}
