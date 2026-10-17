@@ -26,7 +26,7 @@ pub struct Memory {
     /// 32 ビットのプラグイン向けの割り当て先（番地が 2^32 未満に収まる範囲）
     heap_next32: u64,
     /// 直前に当たった領域の添字（読み書きと命令の取得は、同じ領域に続けて当たることが多いので、まずここを調べる）
-    last_data: std::cell::Cell<usize>,
+    last_data: [std::cell::Cell<usize>; 4],
     last_code: std::cell::Cell<usize>,
     /// 領域の添字を start の小さい順に並べたもの（領域が多いとき、二分探索で見つける）
     order: Vec<usize>,
@@ -83,24 +83,36 @@ impl Memory {
 
     fn find(&self, addr: u64, len: usize) -> R<(usize, usize)> {
         let hit = |r: &Region| addr >= r.start && addr + len as u64 <= r.start + r.data.len() as u64;
-        // 直前に当たった領域を先に調べる（多くの読み書きはここで済む）
-        let last = self.last_data.get();
-        if let Some(r) = self.regions.get(last) {
-            if hit(r) {
-                return Ok((last, (addr - r.start) as usize));
+        // 直前に当たった領域を先に調べる（多くの読み書きはここで済む。スタック、DLL のデータ、バッファが交互に来るので 4 つ覚える）
+        for k in 0..4 {
+            let last = self.last_data[k].get();
+            if let Some(r) = self.regions.get(last) {
+                if hit(r) {
+                    if k > 0 {
+                        self.last_data[k].set(self.last_data[0].get());
+                        self.last_data[0].set(last);
+                    }
+                    return Ok((last, (addr - r.start) as usize));
+                }
             }
         }
         let p = self.order.partition_point(|&k| self.regions[k].start <= addr);
         for &i in self.order[p.saturating_sub(6)..p].iter().rev() {
             if hit(&self.regions[i]) {
-                self.last_data.set(i);
+                self.last_data[3].set(self.last_data[2].get());
+                self.last_data[2].set(self.last_data[1].get());
+                self.last_data[1].set(self.last_data[0].get());
+                self.last_data[0].set(i);
                 return Ok((i, (addr - self.regions[i].start) as usize));
             }
         }
         // 領域が重なっている場合（大きな領域の中に別の領域がある）は、二分探索で見つからないので全部調べる
         for (i, r) in self.regions.iter().enumerate() {
             if hit(r) {
-                self.last_data.set(i);
+                self.last_data[3].set(self.last_data[2].get());
+                self.last_data[2].set(self.last_data[1].get());
+                self.last_data[1].set(self.last_data[0].get());
+                self.last_data[0].set(i);
                 return Ok((i, (addr - r.start) as usize));
             }
         }
