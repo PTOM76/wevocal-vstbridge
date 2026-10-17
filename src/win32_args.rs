@@ -26,6 +26,8 @@ pub fn gui_arg_count(name: &str) -> Option<u64> {
         "DefWindowProcA" | "MapWindowPoints" => 4,
         "DrawTextA" | "PeekMessageA" => 5,
         "CreateWindowExA" => 12,
+        // MSIMG32
+        "TransparentBlt" | "AlphaBlend" => 11,
         _ => return None,
     })
 }

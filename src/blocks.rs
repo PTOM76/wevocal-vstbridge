@@ -32,7 +32,7 @@ pub struct Blocks {
 
 impl Default for Blocks {
     fn default() -> Self {
-        Blocks { code: Vec::new(), generics: Vec::new(), map: HashMap::default(), slots: vec![(0, 0, 0); SLOTS] }
+        Blocks { code: Vec::new(), generics: Vec::new(), map: HashMap::default(), slots: vec![(u64::MAX, 0, 0); SLOTS] }
     }
 }
 
@@ -42,7 +42,7 @@ impl Blocks {
         self.code.clear();
         self.generics.clear();
         self.map.clear();
-        self.slots.iter_mut().for_each(|s| s.0 = 0);
+        self.slots.iter_mut().for_each(|s| s.0 = u64::MAX);
     }
 }
 
@@ -113,6 +113,10 @@ impl Emu {
                 return Ok(());
             }
             if self.try_thunk(rip)? {
+                if self.yield_req {
+                    self.yield_req = false;
+                    return Err(Fault(crate::emu::YIELD.into()));
+                }
                 continue;
             }
             if self.mem.code_dirty {

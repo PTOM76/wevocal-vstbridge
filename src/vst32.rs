@@ -33,6 +33,8 @@ pub struct Vst32 {
     pub num_params: i32,
     pub num_inputs: i32,
     pub num_outputs: i32,
+    /// DLL を読み込んだ番地（リソースを探すのに使う）
+    pub base: u32,
     /// 音を通すときのバッファ（ブロックごとに確保し直さない。メモリが増え続けるため）
     io: Option<Io>,
 }
@@ -61,7 +63,12 @@ impl Vst32 {
             if std::env::var("VSTBRIDGE_TRACE").is_ok() {
                 eprintln!("[audioMaster] opcode={opcode}");
             }
-            // 1=version（2400）、6=wantMidi、ほかは 0。音の処理に関わる要求（サンプルレートなど）はプラグインが dispatcher で受け取る側
+            // 0=automate（画面でつまみを動かした。index と opt の値を記録して、ホストが音の側へ渡す）、1=version（2400）、ほかは 0
+            if opcode == 0 {
+                let index = e.mem.read_n(esp + 8, 4)? as i32;
+                let value = f32::from_bits(e.mem.read_n(esp + 20, 4)? as u32);
+                e.gui.automation.push((index, value));
+            }
             Ok(if opcode == 1 { 2400 } else { 0 })
         }));
 
@@ -80,7 +87,7 @@ impl Vst32 {
         let num_params = emu.mem.read_n(effect as u64 + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect as u64 + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect as u64 + off::NUM_OUTPUTS, 4)? as i32;
-        let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs, io: None };
+        let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs, base: img.base as u32, io: None };
         // ホストが普通に行う初期化（開く、サンプルレート、ブロックサイズ、電源オン）。これをしないと内部バッファが未初期化のまま
         v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_PROGRAM, 0, 0, 0, 0.0)?;
@@ -91,7 +98,7 @@ impl Vst32 {
     }
 
     /// dispatcher(effect, opcode, index, value, ptr, opt) を呼ぶ
-    fn dispatch(&mut self, opcode: u64, index: u64, value: u64, ptr: u64, opt: f32) -> R<u64> {
+    pub fn dispatch(&mut self, opcode: u64, index: u64, value: u64, ptr: u64, opt: f32) -> R<u64> {
         let f = self.ptr(off::DISPATCHER)?;
         if f == 0 {
             return Ok(0);

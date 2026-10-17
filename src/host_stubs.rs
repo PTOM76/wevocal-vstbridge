@@ -6,7 +6,7 @@ use crate::mem::R;
 
 /// スタックから n 番目の引数（1 始まり）を読む。ホストの関数が呼ばれる時点では、戻り先はもう pop 済みで、
 /// esp は 1 番目の引数を指している（emu.rs の run() の決まり）
-fn arg(e: &Emu, n: u64) -> R<u64> {
+pub(crate) fn arg(e: &Emu, n: u64) -> R<u64> {
     let esp = e.cpu.regs[crate::cpu::RSP];
     e.mem.read_n(esp + (n - 1) * 4, 4)
 }
@@ -259,6 +259,8 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         ("KERNEL32.DLL", "TlsAlloc") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0) })),
         ("KERNEL32.DLL", "TlsGetValue") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0) })),
         ("KERNEL32.DLL", "TlsSetValue") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(1) })),
+        // 画面（エディター）の API は gui_api.rs
+        ("USER32.DLL" | "GDI32.DLL", name) => crate::gui_api::resolve(name),
         _ => None,
     }
 }
