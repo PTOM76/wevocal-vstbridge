@@ -26,6 +26,16 @@ pub struct Vst {
     pub num_params: i32,
     pub num_inputs: i32,
     pub num_outputs: i32,
+    /// 音を通すときのバッファ（ブロックごとに確保し直さない）
+    io: Option<Io>,
+}
+
+struct Io {
+    frames: usize,
+    in_ptrs: u64,
+    in_bufs: Vec<u64>,
+    out_ptrs: u64,
+    out_bufs: Vec<u64>,
 }
 
 impl Vst {
@@ -57,7 +67,7 @@ impl Vst {
         let num_params = emu.mem.read_n(effect + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect + off::NUM_OUTPUTS, 4)? as i32;
-        Ok(Vst { emu, effect, num_params, num_inputs, num_outputs })
+        Ok(Vst { emu, effect, num_params, num_inputs, num_outputs, io: None })
     }
 
     fn ptr(&self, field: u64) -> R<u64> {
@@ -105,24 +115,33 @@ impl Vst {
     pub fn process(&mut self, input: &[Vec<f32>], frames: usize) -> R<Vec<Vec<f32>>> {
         let ni = self.num_inputs.max(0) as usize;
         let no = self.num_outputs.max(0) as usize;
-        let mem = &mut self.emu.mem;
-        // 入力のバッファを置き、ポインターの配列（in**）を作る
-        let in_ptrs = mem.alloc(ni * 8);
-        for c in 0..ni {
-            let buf = mem.alloc(frames * 4);
+        // バッファは、ブロックの長さが変わったときだけ確保し直す
+        if self.io.as_ref().map(|io| io.frames) != Some(frames) {
+            let mem = &mut self.emu.mem;
+            let in_ptrs = mem.alloc(ni * 8);
+            let mut in_bufs = Vec::with_capacity(ni);
+            for c in 0..ni {
+                let buf = mem.alloc(frames * 4);
+                mem.write_n(in_ptrs + c as u64 * 8, 8, buf)?;
+                in_bufs.push(buf);
+            }
+            let out_ptrs = mem.alloc(no * 8);
+            let mut out_bufs = Vec::with_capacity(no);
+            for c in 0..no {
+                let buf = mem.alloc(frames * 4);
+                mem.write_n(out_ptrs + c as u64 * 8, 8, buf)?;
+                out_bufs.push(buf);
+            }
+            self.io = Some(Io { frames, in_ptrs, in_bufs, out_ptrs, out_bufs });
+        }
+        let io = self.io.as_ref().unwrap();
+        for (c, buf) in io.in_bufs.iter().enumerate() {
             let src = input.get(c).map(|v| v.as_slice()).unwrap_or(&[]);
             let mut data = vec![0f32; frames];
             data[..src.len().min(frames)].copy_from_slice(&src[..src.len().min(frames)]);
-            mem.write_f32s(buf, &data)?;
-            mem.write_n(in_ptrs + c as u64 * 8, 8, buf)?;
+            self.emu.mem.write_f32s(*buf, &data)?;
         }
-        let out_ptrs = mem.alloc(no * 8);
-        let mut out_bufs = Vec::with_capacity(no);
-        for c in 0..no {
-            let buf = mem.alloc(frames * 4);
-            mem.write_n(out_ptrs + c as u64 * 8, 8, buf)?;
-            out_bufs.push(buf);
-        }
+        let (in_ptrs, out_ptrs, out_bufs) = (io.in_ptrs, io.out_ptrs, io.out_bufs.clone());
         let process = self.ptr(off::PROCESS_REPLACING)?;
         if process == 0 {
             return Err(Fault("processReplacing が無い".into()));

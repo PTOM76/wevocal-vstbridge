@@ -15,4 +15,5 @@ for (let b = 0; b < blocks; b++) {
   v.process([imp, imp], n)
 }
 const t2 = performance.now()
+console.log(`rss ${(process.memoryUsage().rss/1048576).toFixed(0)} MB`)
 console.log(`読み込み ${(t1 - t0).toFixed(0)} ms、${secs} 秒分の処理 ${(t2 - t1).toFixed(0)} ms（実時間の ${((t2 - t1) / 1000 / secs).toFixed(2)} 倍）`)
