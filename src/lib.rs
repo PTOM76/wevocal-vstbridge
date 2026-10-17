@@ -12,4 +12,5 @@ pub mod pe32;
 pub mod sse;
 pub mod vst;
 pub mod vst32;
+pub mod win32_args;
 pub mod x87;

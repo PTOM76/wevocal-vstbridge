@@ -150,6 +150,53 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             let r = if size == 8 { a.swap_bytes() } else { (a as u32).swap_bytes() as u64 };
             cpu.write_op(mem, i, 0, r)?;
         }
+        // 1 引数の乗除算。幅ごとに、積は (上位:下位) の組（8 ビットは ax、16 ビットは dx:ax、32 ビットは edx:eax、64 ビットは rdx:rax）に入る
+        M::Mul | M::Imul | M::Div | M::Idiv if i.op_count() == 1 => {
+            let size = dst_size(i);
+            let (v, _) = cpu.read_op(mem, i, 0)?;
+            let v = v & mask(size);
+            let signed = matches!(m, M::Imul | M::Idiv);
+            let bits = size * 8;
+            // 符号つきなら符号を広げた i128、なければそのままの u128 で計算する
+            let wide = |x: u64| -> i128 { if signed { sext(x, size) as i64 as i128 } else { (x & mask(size)) as i128 } };
+            let acc_lo = if size == 1 { cpu.regs[0] & 0xff } else { cpu.regs[0] & mask(size) };
+            let hi = if size == 1 { (cpu.regs[0] >> 8) & 0xff } else { cpu.regs[2] & mask(size) };
+            if matches!(m, M::Mul | M::Imul) {
+                let prod = wide(acc_lo) * wide(v);
+                let lo = (prod as u128 & ((1u128 << bits) - 1)) as u64;
+                let up = ((prod >> bits) as u128 & ((1u128 << bits) - 1)) as u64;
+                if size == 1 {
+                    cpu.regs[0] = (cpu.regs[0] & !0xffff) | (up << 8) | lo;
+                } else {
+                    cpu.set_reg(match size { 2 => iced_x86::Register::AX, 4 => iced_x86::Register::EAX, _ => iced_x86::Register::RAX }, lo)?;
+                    cpu.set_reg(match size { 2 => iced_x86::Register::DX, 4 => iced_x86::Register::EDX, _ => iced_x86::Register::RDX }, up)?;
+                }
+                // 上位が下位の符号拡張（imul）、または 0（mul）でなければ、桁あふれ
+                let over = if signed { prod != sext(lo, size) as i64 as i128 } else { up != 0 };
+                cpu.flags.cf = over;
+                cpu.flags.of = over;
+            } else {
+                if v == 0 {
+                    return Err(Fault("divide by zero".into()));
+                }
+                let dividend: i128 = if signed {
+                    let top = (hi as i128) << bits;
+                    let full = top | acc_lo as i128;
+                    // 上位を含めた全体を符号つきの数にする
+                    (full << (128 - 2 * bits)) >> (128 - 2 * bits)
+                } else {
+                    ((hi as u128) << bits | acc_lo as u128) as i128
+                };
+                let d = wide(v);
+                let (q, r) = (dividend / d, dividend % d);
+                if size == 1 {
+                    cpu.regs[0] = (cpu.regs[0] & !0xffff) | (((r as u64) & 0xff) << 8) | ((q as u64) & 0xff);
+                } else {
+                    cpu.set_reg(match size { 2 => iced_x86::Register::AX, 4 => iced_x86::Register::EAX, _ => iced_x86::Register::RAX }, q as u64)?;
+                    cpu.set_reg(match size { 2 => iced_x86::Register::DX, 4 => iced_x86::Register::EDX, _ => iced_x86::Register::RDX }, r as u64)?;
+                }
+            }
+        }
         M::Imul if i.op_count() >= 2 => {
             let size = dst_size(i);
             let (a, b) = if i.op_count() == 3 { (cpu.read_op(mem, i, 1)?.0, cpu.read_op(mem, i, 2)?.0) } else { (cpu.read_op(mem, i, 0)?.0, cpu.read_op(mem, i, 1)?.0) };

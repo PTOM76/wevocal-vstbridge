@@ -25,7 +25,10 @@ pub fn arg_count(name: &str) -> u64 {
         "GetStringTypeW" => 4,
         "LCMapStringA" | "LCMapStringW" | "MultiByteToWideChar" => 6,
         "WideCharToMultiByte" => 8,
-        _ => 0,
+        // KERNEL32 の足りないもの
+        "GlobalFree" | "GlobalLock" | "GlobalUnlock" | "GlobalSize" | "FreeLibrary" | "TlsFree" | "SetUnhandledExceptionFilter" => 1,
+        "VirtualFree" => 3,
+        _ => crate::win32_args::gui_arg_count(name).unwrap_or(0),
     }
 }
 

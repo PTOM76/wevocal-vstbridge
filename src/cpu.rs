@@ -29,11 +29,15 @@ pub struct Cpu {
     pub fpu_top: usize,
     /// x87 の C0〜C3 の比較の結果（fcom、fnstsw で使う。bit8=C0、bit14=C3 として状態ワードに入れる）
     pub fpu_c: (bool, bool, bool, bool),
+    /// x87 のスタックに今積んである数（調べるための数え。積みすぎ・下ろしすぎを見つける）
+    pub fpu_depth: i32,
+    /// x87 の制御ワード（丸めの向きは bit10〜11。既定 0x037F = 最近接偶数）
+    pub fpu_cw: u16,
 }
 
 impl Default for Cpu {
     fn default() -> Self {
-        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0, fpu: [0.0; 8], fpu_top: 0, fpu_c: (false, false, false, false) }
+        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0, fpu: [0.0; 8], fpu_top: 0, fpu_c: (false, false, false, false), fpu_depth: 0, fpu_cw: 0x037f }
     }
 }
 
@@ -205,6 +209,16 @@ impl Cpu {
         }
     }
 
+    /// x87: 制御ワードの丸めの向きに従って丸める（00 最近接偶数、01 切り下げ、10 切り上げ、11 切り捨て）
+    pub fn fround(&self, v: f64) -> f64 {
+        match (self.fpu_cw >> 10) & 3 {
+            0 => v.round_ties_even(),
+            1 => v.floor(),
+            2 => v.ceil(),
+            _ => v.trunc(),
+        }
+    }
+
     /// x87: st(0) を読む
     pub fn st(&self, n: usize) -> f64 {
         self.fpu[(self.fpu_top + n) % 8]
@@ -217,12 +231,20 @@ impl Cpu {
 
     /// x87: スタックに積む（top を 1 減らして st(0) にする）
     pub fn fpush(&mut self, v: f64) {
+        self.fpu_depth += 1;
+        if self.fpu_depth > 8 && std::env::var("VSTBRIDGE_FPU").is_ok() {
+            eprintln!("[fpu] x87 のスタックが 8 本を超えて積まれた（深さ {}）rip={:#x}", self.fpu_depth, self.rip);
+        }
         self.fpu_top = (self.fpu_top + 7) % 8;
         self.fpu[self.fpu_top] = v;
     }
 
     /// x87: スタックから下ろす（st(0) を捨てて top を 1 進める）
     pub fn fpop(&mut self) -> f64 {
+        self.fpu_depth -= 1;
+        if self.fpu_depth < 0 && std::env::var("VSTBRIDGE_FPU").is_ok() {
+            eprintln!("[fpu] x87 のスタックが空なのに下ろした（深さ {}）rip={:#x}", self.fpu_depth, self.rip);
+        }
         let v = self.fpu[self.fpu_top];
         self.fpu_top = (self.fpu_top + 1) % 8;
         v

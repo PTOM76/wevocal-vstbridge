@@ -77,3 +77,48 @@ fn fyl2x_pops_and_multiplies() {
     let e = with_stack(&[0xD9, 0xF1], &[2.0, 8.0]);
     assert_eq!(e.cpu.st(0), 6.0);
 }
+
+// ---- 整数の乗除算（1 引数）。機械語を直接置いて、手計算の答えと比べる ----
+fn with_regs(code: &[u8], regs: &[(usize, u64)]) -> Emu {
+    run(code, |e| {
+        for (i, v) in regs {
+            e.cpu.regs[*i] = *v;
+        }
+    })
+}
+
+#[test]
+fn mul_ecx_unsigned() {
+    // F7 E1 = MUL ECX。eax=0x10000000、ecx=0x30 → 0x3_0000_0000 = edx:eax = 0x3:0x0
+    let e = with_regs(&[0xF7, 0xE1], &[(0, 0x1000_0000), (1, 0x30)]);
+    assert_eq!((e.cpu.regs[2] & 0xffff_ffff, e.cpu.regs[0] & 0xffff_ffff), (0x3, 0x0));
+}
+
+#[test]
+fn imul_ecx_signed_negative() {
+    // F7 E9 = IMUL ECX。eax=-3、ecx=5 → -15 = edx:eax = 0xFFFFFFFF:0xFFFFFFF1
+    let e = with_regs(&[0xF7, 0xE9], &[(0, (-3i32) as u32 as u64), (1, 5)]);
+    assert_eq!((e.cpu.regs[2] & 0xffff_ffff, e.cpu.regs[0] & 0xffff_ffff), (0xffff_ffff, (-15i32) as u32 as u64));
+}
+
+#[test]
+fn div_ecx_unsigned() {
+    // F7 F1 = DIV ECX。edx:eax = 0x1:0x00000005（= 4294967301）÷ 10 → 商 429496730（0x1999999A）、余り 1
+    let e = with_regs(&[0xF7, 0xF1], &[(2, 1), (0, 5), (1, 10)]);
+    assert_eq!((e.cpu.regs[0] & 0xffff_ffff, e.cpu.regs[2] & 0xffff_ffff), (429496730, 1));
+}
+
+#[test]
+fn idiv_ecx_signed() {
+    // F7 F9 = IDIV ECX。edx:eax = -7（edx=0xFFFFFFFF、eax=0xFFFFFFF9）÷ 2 → 商 -3、余り -1
+    let e = with_regs(&[0xF7, 0xF9], &[(2, 0xffff_ffff), (0, (-7i32) as u32 as u64), (1, 2)]);
+    assert_eq!(e.cpu.regs[0] & 0xffff_ffff, (-3i32) as u32 as u64);
+    assert_eq!(e.cpu.regs[2] & 0xffff_ffff, (-1i32) as u32 as u64);
+}
+
+#[test]
+fn mul_cl_byte() {
+    // F6 E1 = MUL CL。al=200、cl=3 → 600 = ax = 0x0258
+    let e = with_regs(&[0xF6, 0xE1], &[(0, 200), (1, 3)]);
+    assert_eq!(e.cpu.regs[0] & 0xffff, 600);
+}

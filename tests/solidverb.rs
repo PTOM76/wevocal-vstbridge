@@ -87,3 +87,56 @@ fn long_run_no_nan() {
         }
     }
 }
+
+/// 環境変数 VST32_DLL で指定した 32 ビットの VST2 が、読み込めて、名前とつまみが取れて、音を通せるかを見る（調べるための表示）。
+/// 例: VST32_DLL="…/SH-1 Reverb.dll" cargo test --test solidverb try_other_dll -- --ignored --nocapture
+#[test]
+#[ignore]
+fn try_other_dll() {
+    let Ok(path) = std::env::var("VST32_DLL") else { return; };
+    let data = std::fs::read(&path).expect("read dll");
+    let mut v = match Vst32::load(&data) {
+        Ok(v) => v,
+        Err(e) => panic!("load failed: {}", e.0),
+    };
+    let name = v.name().unwrap_or_default();
+    let params: Vec<String> = (0..v.num_params).map(|i| v.param_name(i).unwrap_or_default()).collect();
+    println!("name={name:?} in={} out={} params={} {params:?}", v.num_inputs, v.num_outputs, v.num_params);
+    let n = 128;
+    let mut imp = vec![0f32; n];
+    imp[0] = 1.0;
+    let out = v.process(&[imp.clone(), imp.clone()], n).expect("process");
+    let e: f32 = out[0].iter().map(|x| x.abs()).sum();
+    println!("process ok: energy={e:.4} finite={}", out[0].iter().all(|x| x.is_finite()));
+}
+
+/// 環境変数 VST32_DLL の VST に、インパルスを流して、ウェットの尾が出るかを見る（wet と dry のつまみの番号は WET、DRY で指定）
+/// 例: VST32_DLL="…/SH-1 Reverb.dll" WET=9 DRY=10 cargo test --test solidverb try_tail -- --ignored --nocapture
+#[test]
+#[ignore]
+fn try_tail() {
+    let Ok(path) = std::env::var("VST32_DLL") else { return; };
+    let get = |k: &str, d: i32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (wet, dry) = (get("WET", 9), get("DRY", 10));
+    let data = std::fs::read(&path).expect("read dll");
+    let mut v = Vst32::load(&data).expect("load");
+    v.set_param(wet, 0.8).unwrap();
+    v.set_param(dry, 0.0).unwrap();
+    let n = 128;
+    let mut energy = Vec::new();
+    for b in 0..60 {
+        let mut imp = vec![0f32; n];
+        if b == 0 {
+            imp[0] = 1.0;
+        }
+        let out = v.process(&[imp.clone(), imp], n).unwrap();
+        if let Some(i) = out[0].iter().position(|x| !x.is_finite()) {
+            println!("ブロック {b} の {i} サンプル目で NaN");
+            break;
+        }
+        energy.push(out[0].iter().map(|x| x.abs()).sum::<f32>());
+    }
+    let total: f32 = energy.iter().sum();
+    println!("ブロックごとのエネルギー（先頭 12）: {:?}", energy.iter().take(12).map(|e| (e * 1000.0).round() / 1000.0).collect::<Vec<_>>());
+    println!("合計 {total:.4}、尾（ブロック 4 以降）= {:.4}", energy.iter().skip(4).sum::<f32>());
+}

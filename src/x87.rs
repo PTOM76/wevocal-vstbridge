@@ -67,7 +67,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 let size = i.memory_size().size();
                 if is_int(i) {
                     // fisttp は 0 方向への切り捨て、fist/fistp は丸め（最も近い）
-                    let n = if m == M::Fisttp { v.trunc() } else { v.round_ties_even() } as i64;
+                    let n = if m == M::Fisttp { v.trunc() } else { cpu.fround(v) } as i64;
                     mem.write_n(a, size, n as u64)?;
                 } else if size == 4 {
                     let f = v as f32;
@@ -112,7 +112,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             cpu.set_st(0, v);
         }
         M::Frndint => {
-            let v = cpu.st(0).round_ties_even();
+            let v = cpu.fround(cpu.st(0));
             cpu.set_st(0, v);
         }
         // 超越関数（st(0) を書き換える）
@@ -230,9 +230,14 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
         // 制御ワードの読み書きは、丸めの設定などだが、ここでは何もしない（既定の丸めで計算する）
         M::Fnstcw => {
             let a = cpu.addr(i)?;
-            mem.write_n(a, 2, 0x037f)?; // 既定の制御ワード
+            mem.write_n(a, 2, cpu.fpu_cw as u64)?;
         }
-        M::Fldcw | M::Fnclex | M::Fninit | M::Wait => {}
+        M::Fldcw => {
+            let a = cpu.addr(i)?;
+            cpu.fpu_cw = mem.read_n(a, 2)? as u16;
+        }
+        M::Fninit => cpu.fpu_cw = 0x037f,
+        M::Fnclex | M::Wait => {}
         _ => return Ok(false),
     }
     Ok(true)

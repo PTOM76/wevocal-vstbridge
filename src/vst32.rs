@@ -74,7 +74,7 @@ impl Vst32 {
         v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_PROGRAM, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 0, 48000.0)?;
-        v.dispatch(EFF_SET_BLOCK_SIZE, 0, 0, 2048, 0.0)?;
+        v.dispatch(EFF_SET_BLOCK_SIZE, 0, 2048, 0, 0.0)?; // ブロックサイズは value で渡す（ptr ではない）
         v.dispatch(EFF_MAINS_CHANGED, 0, 1, 0, 0.0)?;
         Ok(v)
     }
