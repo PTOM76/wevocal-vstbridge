@@ -36,6 +36,12 @@ pub struct Emu {
     pub heap_sizes: HashMap<u64, usize>,
     /// x87 で最初に NaN になる命令を見張る（環境変数 VSTBRIDGE_NAN があるときだけ）
     nan_watch: bool,
+    /// この呼び出しが始まったときの命令数（無限ループの見張りは、呼び出しごとに数える）
+    call_start: u64,
+    /// 全命令とレジスタを出す（環境変数 VSTBRIDGE_TRACE。毎命令は読まないよう、作るときに 1 度だけ読む）
+    trace: bool,
+    /// デコード済みの命令（番地 → 命令）。コードが書き換わる（自己展開が終わったあと）ことはないとみなす。展開が終わってから使うため、書き込みで無効にする
+    decoded: HashMap<u64, Instruction>,
 }
 
 impl Emu {
@@ -66,7 +72,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok() }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::new() }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -122,6 +128,7 @@ impl Emu {
 
     /// rip から命令を実行する。戻りの印に来たら止める。ホストの入口に飛んだらその関数を呼ぶ
     fn run(&mut self) -> R<()> {
+        self.call_start = self.cpu.steps;
         loop {
             let rip = self.cpu.rip;
             if rip == RETURN_MAGIC {
@@ -140,7 +147,8 @@ impl Emu {
             }
             self.step()?;
             self.cpu.steps += 1;
-            if self.cpu.steps > MAX_STEPS {
+            // 1 回の呼び出しの中での命令数の上限（累積ではなく、この呼び出しが始まってからの数）
+            if self.cpu.steps - self.call_start > MAX_STEPS {
                 return Err(Fault("step limit".into()));
             }
         }
@@ -149,13 +157,26 @@ impl Emu {
     /// 命令を 1 つ読んで実行する。rip は命令の長さだけ進める（分岐の命令は中で rip を変える）
     fn step(&mut self) -> R<()> {
         let rip = self.cpu.rip;
-        let bytes = self.mem.fetch(rip, 16)?;
-        let mut dec = Decoder::with_ip(self.bits, bytes, rip, DecoderOptions::NONE);
-        let insn = dec.decode();
-        if insn.is_invalid() {
-            return Err(Fault(format!("decode {rip:#x}")));
+        // 読み取った命令を番地ごとに覚えておく（同じ処理を何度も回すので、デコードは 1 回で済む）
+        // コードの領域に書き込みがあったら（自己展開、コードの書き換え）、覚えた命令を全部捨てる
+        if self.mem.code_dirty {
+            self.mem.code_dirty = false;
+            self.decoded.clear();
         }
-        if std::env::var("VSTBRIDGE_TRACE").is_ok() {
+        let insn = match self.decoded.get(&rip) {
+            Some(i) => *i,
+            None => {
+                let bytes = self.mem.fetch(rip, 16)?;
+                let mut dec = Decoder::with_ip(self.bits, bytes, rip, DecoderOptions::NONE);
+                let insn = dec.decode();
+                if insn.is_invalid() {
+                    return Err(Fault(format!("decode {rip:#x}")));
+                }
+                self.decoded.insert(rip, insn);
+                insn
+            }
+        };
+        if self.trace {
             let r = &self.cpu.regs;
             let top = self.mem.read_n(r[4], 4).unwrap_or(0xdead_dead);
             eprintln!(
@@ -168,27 +189,39 @@ impl Emu {
     }
 
     fn run_insn(&mut self, insn: &Instruction) -> R<()> {
-        if exec::exec(&mut self.cpu, &mut self.mem, insn)? {
-            return Ok(());
-        }
-        if sse::exec(&mut self.cpu, &mut self.mem, insn)? {
-            return Ok(());
-        }
-        if self.nan_watch {
-            let before: Vec<f64> = (0..8).map(|n| self.cpu.st(n)).collect();
-            if crate::x87::exec(&mut self.cpu, &mut self.mem, insn)? {
-                if !before.iter().any(|v| !v.is_finite()) && (0..8).any(|n| !self.cpu.st(n).is_finite()) {
-                    eprintln!("[nan] 最初に NaN か inf になった x87 命令: {insn} @ {:#x}
-  前: {:?}
-  後: {:?}", insn.ip(), before, (0..8).map(|n| self.cpu.st(n)).collect::<Vec<_>>());
-                    self.nan_watch = false;
-                }
+        // x87（F2xm1〜Fyl2xp1 の範囲）が大半のコード（古いリバーブやフィルター）では、整数と SSE の判定を 2 回通るのが無駄なので、先に x87 を試す。
+        // 範囲の外の命令は、整数 → SSE の順（x87 は飛ばす）
+        let m = insn.mnemonic() as u32;
+        if (158..=265).contains(&m) {
+            if self.x87(insn)? {
                 return Ok(());
             }
-        } else if crate::x87::exec(&mut self.cpu, &mut self.mem, insn)? {
+            if exec::exec(&mut self.cpu, &mut self.mem, insn)? || sse::exec(&mut self.cpu, &mut self.mem, insn)? {
+                return Ok(());
+            }
+        } else if exec::exec(&mut self.cpu, &mut self.mem, insn)? || sse::exec(&mut self.cpu, &mut self.mem, insn)? {
+            return Ok(());
+        } else if self.x87(insn)? {
+            // 範囲の外の x87 の命令（wait など）
             return Ok(());
         }
         Err(Fault(format!("unimplemented {insn} @ {:#x}", insn.ip())))
+    }
+
+    /// x87 の命令を実行する。環境変数 VSTBRIDGE_NAN があれば、最初に NaN か inf になった命令を報告する
+    fn x87(&mut self, insn: &Instruction) -> R<bool> {
+        if !self.nan_watch {
+            return crate::x87::exec(&mut self.cpu, &mut self.mem, insn);
+        }
+        let before: Vec<f64> = (0..8).map(|n| self.cpu.st(n)).collect();
+        let done = crate::x87::exec(&mut self.cpu, &mut self.mem, insn)?;
+        if done && !before.iter().any(|v| !v.is_finite()) && (0..8).any(|n| !self.cpu.st(n).is_finite()) {
+            eprintln!("[nan] 最初に NaN か inf になった x87 命令: {insn} @ {:#x}
+  前: {:?}
+  後: {:?}", insn.ip(), before, (0..8).map(|n| self.cpu.st(n)).collect::<Vec<_>>());
+            self.nan_watch = false;
+        }
+        Ok(done)
     }
 }
 

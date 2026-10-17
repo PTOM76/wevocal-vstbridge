@@ -11,6 +11,8 @@ struct Region {
     data: Vec<u8>,
     /// ホストが確保した領域で、プラグインが要求したサイズ（これを超える書き込みは範囲外。0 なら見張らない）
     limit: usize,
+    /// 命令として読まれたことがある領域か（自己展開のコードなど。ここへの書き込みは、デコード済みの命令を無効にする）
+    executed: std::cell::Cell<bool>,
 }
 
 #[derive(Default)]
@@ -20,6 +22,11 @@ pub struct Memory {
     heap_next: u64,
     /// 32 ビットのプラグイン向けの割り当て先（番地が 2^32 未満に収まる範囲）
     heap_next32: u64,
+    /// 直前に当たった領域の添字（読み書きと命令の取得は、同じ領域に続けて当たることが多いので、まずここを調べる）
+    last_data: std::cell::Cell<usize>,
+    last_code: std::cell::Cell<usize>,
+    /// 命令として読まれた領域へ書き込みがあった（デコード済みの命令を捨てる合図。Emu が読んで戻す）
+    pub code_dirty: bool,
 }
 
 /// ホストが確保する領域の始まり（プラグインの DLL やスタックとぶつからない所）
@@ -29,12 +36,12 @@ pub const HEAP_BASE_32: u64 = 0x6000_0000;
 
 impl Memory {
     pub fn new() -> Self {
-        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32 }
+        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32, last_data: Default::default(), last_code: Default::default(), code_dirty: false }
     }
 
     /// start から size バイトを 0 で割り当てる
     pub fn map(&mut self, start: u64, size: usize) {
-        self.regions.push(Region { start, data: vec![0; size], limit: 0 });
+        self.regions.push(Region { start, data: vec![0; size], limit: 0, executed: Default::default() });
     }
 
     /// ホストの領域から size バイトを 16 バイト境界で確保し、その番地を返す
@@ -61,8 +68,17 @@ impl Memory {
     }
 
     fn find(&self, addr: u64, len: usize) -> R<(usize, usize)> {
+        let hit = |r: &Region| addr >= r.start && addr + len as u64 <= r.start + r.data.len() as u64;
+        // 直前に当たった領域を先に調べる（多くの読み書きはここで済む）
+        let last = self.last_data.get();
+        if let Some(r) = self.regions.get(last) {
+            if hit(r) {
+                return Ok((last, (addr - r.start) as usize));
+            }
+        }
         for (i, r) in self.regions.iter().enumerate() {
-            if addr >= r.start && addr + len as u64 <= r.start + r.data.len() as u64 {
+            if hit(r) {
+                self.last_data.set(i);
                 return Ok((i, (addr - r.start) as usize));
             }
         }
@@ -78,6 +94,9 @@ impl Memory {
     pub fn write(&mut self, addr: u64, buf: &[u8]) -> R<()> {
         let (i, o) = self.find(addr, buf.len())?;
         // 確保したブロックの要求サイズを超えた書き込みを報告する（VSTBRIDGE_OOB=1。調査用）
+        if self.regions[i].executed.get() {
+            self.code_dirty = true;
+        }
         let lim = self.regions[i].limit;
         if lim > 0 && o + buf.len() > lim && std::env::var("VSTBRIDGE_OOB").is_ok() {
             eprintln!("[oob] 確保 {} バイトのブロック {:#x} の外へ書いた: オフセット {} から {} バイト", lim, self.regions[i].start, o, buf.len());
@@ -88,10 +107,22 @@ impl Memory {
 
     /// 命令を読むための、addr から読めるだけ（最大 len）の写し
     pub fn fetch(&self, addr: u64, len: usize) -> R<&[u8]> {
-        for r in &self.regions {
+        fn slice(r: &Region, addr: u64, len: usize) -> &[u8] {
+            let o = (addr - r.start) as usize;
+            &r.data[o..(o + len).min(r.data.len())]
+        }
+        let last = self.last_code.get();
+        if let Some(r) = self.regions.get(last) {
             if addr >= r.start && addr < r.start + r.data.len() as u64 {
-                let o = (addr - r.start) as usize;
-                return Ok(&r.data[o..(o + len).min(r.data.len())]);
+                r.executed.set(true);
+                return Ok(slice(r, addr, len));
+            }
+        }
+        for (i, r) in self.regions.iter().enumerate() {
+            if addr >= r.start && addr < r.start + r.data.len() as u64 {
+                self.last_code.set(i);
+                r.executed.set(true);
+                return Ok(slice(r, addr, len));
             }
         }
         Err(Fault(format!("fetch {addr:#x}")))
