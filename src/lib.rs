@@ -3,6 +3,7 @@
 pub mod cpu;
 pub mod emu;
 pub mod exec;
+pub mod fast;
 pub mod host_stubs;
 #[cfg(target_arch = "wasm32")]
 pub mod js;

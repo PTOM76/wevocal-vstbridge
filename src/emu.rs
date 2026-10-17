@@ -2,6 +2,7 @@
 //! プラグインからホストへの呼び出し（コールバック、import）は「入口の番地」に来たら Rust の関数に回す
 use crate::cpu::{Cpu, RSP};
 use crate::mem::{Fault, Memory, R};
+use crate::fast::{self, Op};
 use crate::{exec, sse};
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 use std::collections::HashMap;
@@ -59,7 +60,9 @@ pub struct Emu {
     /// 全命令とレジスタを出す（環境変数 VSTBRIDGE_TRACE。毎命令は読まないよう、作るときに 1 度だけ読む）
     trace: bool,
     /// デコード済みの命令（番地 → 命令）。コードが書き換わる（自己展開が終わったあと）ことはないとみなす。展開が終わってから使うため、書き込みで無効にする
-    decoded: HashMap<u64, Instruction, FastHash>,
+    decoded: HashMap<u64, (Instruction, Op), FastHash>,
+    /// 前もって解いた形（fast.rs）を使うか（トレースや調査のときは使わない）
+    use_fast: bool,
     /// 命令ごとの回数と時間（VSTBRIDGE_PROF=1。調査用）
     pub prof: Option<HashMap<u32, (u64, u64)>>,
 }
@@ -92,7 +95,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_PROF").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -154,7 +157,7 @@ impl Emu {
             if rip == RETURN_MAGIC {
                 return Ok(());
             }
-            if self.thunks.contains_key(&rip) {
+            if rip >= THUNK_BASE && rip < self.next_thunk && self.thunks.contains_key(&rip) {
                 let ret = self.cpu.pop(&self.mem)?;
                 let (mut f, pop) = self.thunks.remove(&rip).ok_or_else(|| Fault(format!("thunk {rip:#x}")))?;
                 let rax = f(self);
@@ -183,8 +186,8 @@ impl Emu {
             self.mem.code_dirty = false;
             self.decoded.clear();
         }
-        let insn = match self.decoded.get(&rip) {
-            Some(i) => *i,
+        let (insn, op) = match self.decoded.get(&rip) {
+            Some((i, op)) => (*i, *op),
             None => {
                 let bytes = self.mem.fetch(rip, 16)?;
                 let mut dec = Decoder::with_ip(self.bits, bytes, rip, DecoderOptions::NONE);
@@ -192,10 +195,15 @@ impl Emu {
                 if insn.is_invalid() {
                     return Err(Fault(format!("decode {rip:#x}")));
                 }
-                self.decoded.insert(rip, insn);
-                insn
+                let op = if self.use_fast { fast::compile(&insn) } else { Op::Generic };
+                self.decoded.insert(rip, (insn, op));
+                (insn, op)
             }
         };
+        if !matches!(op, Op::Generic) {
+            self.cpu.rip = insn.next_ip();
+            return fast::run(&mut self.cpu, &mut self.mem, op).map_err(|e| Fault(format!("{} (at {rip:#x}: {insn})", e.0)));
+        }
         if self.trace {
             let r = &self.cpu.regs;
             let top = self.mem.read_n(r[4], 4).unwrap_or(0xdead_dead);

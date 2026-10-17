@@ -257,6 +257,69 @@ impl Memory {
     }
 
     /// size バイト（1、2、4、8）を小さい順（little endian）で読む
+    /// 4 バイトを読む（4KB ページの近道つき）
+    #[inline(always)]
+    pub fn read_u32(&self, addr: u64) -> R<u32> {
+        let off = (addr & (PAGE as u64 - 1)) as usize;
+        if addr >> 32 == 0 && off <= PAGE - 4 {
+            let p = self.pages[(addr >> PAGE_BITS) as usize];
+            if p != 0 {
+                // SAFETY: p + off は領域のデータの中（ページ全体が領域に収まっている）で、4 バイト読める
+                return Ok(unsafe { ((p + off) as *const u32).read_unaligned() });
+            }
+        }
+        self.read_n(addr, 4).map(|v| v as u32)
+    }
+
+    #[inline(always)]
+    pub fn read_u64(&self, addr: u64) -> R<u64> {
+        let off = (addr & (PAGE as u64 - 1)) as usize;
+        if addr >> 32 == 0 && off <= PAGE - 8 {
+            let p = self.pages[(addr >> PAGE_BITS) as usize];
+            if p != 0 {
+                // SAFETY: read_u32 と同じ
+                return Ok(unsafe { ((p + off) as *const u64).read_unaligned() });
+            }
+        }
+        self.read_n(addr, 8)
+    }
+
+    #[inline(always)]
+    pub fn write_u32(&mut self, addr: u64, v: u32) -> R<()> {
+        let off = (addr & (PAGE as u64 - 1)) as usize;
+        if addr >> 32 == 0 && off <= PAGE - 4 {
+            let pg = (addr >> PAGE_BITS) as usize;
+            let p = self.pages[pg];
+            if p != 0 {
+                if self.code_pages[pg].get() & block_mask(off, 4) != 0 {
+                    self.code_dirty = true;
+                }
+                // SAFETY: read_u32 と同じ
+                unsafe { ((p + off) as *mut u32).write_unaligned(v) };
+                return Ok(());
+            }
+        }
+        self.write_n(addr, 4, v as u64)
+    }
+
+    #[inline(always)]
+    pub fn write_u64(&mut self, addr: u64, v: u64) -> R<()> {
+        let off = (addr & (PAGE as u64 - 1)) as usize;
+        if addr >> 32 == 0 && off <= PAGE - 8 {
+            let pg = (addr >> PAGE_BITS) as usize;
+            let p = self.pages[pg];
+            if p != 0 {
+                if self.code_pages[pg].get() & block_mask(off, 8) != 0 {
+                    self.code_dirty = true;
+                }
+                // SAFETY: read_u32 と同じ
+                unsafe { ((p + off) as *mut u64).write_unaligned(v) };
+                return Ok(());
+            }
+        }
+        self.write_n(addr, 8, v)
+    }
+
     pub fn read_n(&self, addr: u64, size: usize) -> R<u64> {
         let mut b = [0u8; 8];
         self.read(addr, &mut b[..size])?;
