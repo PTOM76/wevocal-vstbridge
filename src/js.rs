@@ -110,4 +110,68 @@ impl JsVst {
         .map_err(|e| JsError::new(&e.0))?;
         Ok(out.iter().map(|c| js_sys::Float32Array::from(c.as_slice())).collect())
     }
+
+    // ---- エディター（プラグイン自身の画面）。今は 32 ビットだけ ----
+
+    /// 画面を持つか
+    #[wasm_bindgen(js_name = hasEditor)]
+    pub fn has_editor(&mut self) -> bool {
+        match &mut self.0 {
+            Plugin::X86(v) => v.has_editor().unwrap_or(false),
+            Plugin::X64(_) => false,
+        }
+    }
+
+    /// 画面を開く。[幅, 高さ]
+    #[wasm_bindgen(js_name = editorOpen)]
+    pub fn editor_open(&mut self) -> Result<Vec<i32>, JsError> {
+        match &mut self.0 {
+            Plugin::X86(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
+            Plugin::X64(_) => Err(JsError::new("64 ビットの画面は未対応です")),
+        }
+    }
+
+    /// マウスの入力。msg は 0x200 移動、0x201 左ボタンを押した、0x202 離した、0x203 ダブルクリック。keys は bit0 左ボタン、bit1 Ctrl、bit2 Shift
+    #[wasm_bindgen(js_name = editorMouse)]
+    pub fn editor_mouse(&mut self, msg: u32, x: i32, y: i32, keys: u32) -> Result<(), JsError> {
+        match &mut self.0 {
+            Plugin::X86(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
+            Plugin::X64(_) => Ok(()),
+        }
+    }
+
+    /// 一定時間ごと（30 回ほど毎秒）に呼ぶ
+    #[wasm_bindgen(js_name = editorIdle)]
+    pub fn editor_idle(&mut self) -> Result<(), JsError> {
+        match &mut self.0 {
+            Plugin::X86(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
+            Plugin::X64(_) => Ok(()),
+        }
+    }
+
+    /// 今の画面（RGBA。幅と高さは editorOpen で返したもの）
+    #[wasm_bindgen(js_name = editorFrame)]
+    pub fn editor_frame(&self) -> Option<Vec<u8>> {
+        match &self.0 {
+            Plugin::X86(v) => v.editor_frame().map(|(_, _, px)| px),
+            Plugin::X64(_) => None,
+        }
+    }
+
+    /// 画面でつまみを変えた分。[index, 値, index, 値, …]
+    #[wasm_bindgen(js_name = editorChanges)]
+    pub fn editor_changes(&mut self) -> Vec<f32> {
+        match &mut self.0 {
+            Plugin::X86(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
+            Plugin::X64(_) => Vec::new(),
+        }
+    }
+
+    #[wasm_bindgen(js_name = editorClose)]
+    pub fn editor_close(&mut self) -> Result<(), JsError> {
+        match &mut self.0 {
+            Plugin::X86(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
+            Plugin::X64(_) => Ok(()),
+        }
+    }
 }
