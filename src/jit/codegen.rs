@@ -15,9 +15,16 @@ const B: u32 = 2; // i64 作業用（引数 1）
 const R: u32 = 3; // i64 作業用（結果）
 const GA: u32 = 4; // i32 ゲストの番地
 const HP: u32 = 5; // i32 ホストの番地
+const F0: u32 = 6; // f32 作業用
+const F1: u32 = 7;
+const D0: u32 = 8; // f64 作業用
+const D1: u32 = 9;
 
 fn off_reg(idx: usize) -> u64 {
     (offset_of!(Cpu, regs) + idx * 8) as u64
+}
+fn off_xmm(idx: usize) -> u64 {
+    (offset_of!(Cpu, xmm) + idx * 16) as u64
 }
 fn off_flag(f: u64) -> u64 {
     offset_of!(Cpu, flags) as u64 + f
@@ -74,7 +81,15 @@ struct Asm {
     off: Off,
     pages_ptr: u32,
     bits: u32,
+    /// 今の命令で実際に書くフラグ（使われるもの）だけのビット。CF=1,ZF=2,SF=4,OF=8,PF=16
+    flag_mask: u8,
 }
+const FCF: u8 = 1;
+const FZF: u8 = 2;
+const FSF: u8 = 4;
+const FOF: u8 = 8;
+const FPF: u8 = 16;
+const FALL: u8 = 31;
 
 impl Asm {
     /// cpu の番地（局所 0）を積む
@@ -280,20 +295,31 @@ fn sign_bit(b: &mut Vec<W<'static>>, local: u32, size: usize) {
 }
 
 impl Asm {
-    /// A, B（引数、マスク済み）と R（結果、マスク済み）から add/sub のフラグを書く
-    fn flags_addsub(&mut self, sub: bool, size: usize) {
-        let o = &self.off;
-        let (cf, zf, sf, of, pf) = (o.cf, o.zf, o.sf, o.of, o.pf);
-        // zf
+    /// zf を書く（R から）
+    fn emit_zf(&mut self) {
+        if self.flag_mask & FZF == 0 {
+            return;
+        }
+        let zf = self.off.zf;
         self.cpu();
         self.body.push(W::LocalGet(R));
         self.body.push(W::I64Eqz);
         self.body.push(W::I32Store8(MemArg { offset: zf, align: 0, memory_index: 0 }));
-        // sf
+    }
+    fn emit_sf(&mut self, size: usize) {
+        if self.flag_mask & FSF == 0 {
+            return;
+        }
+        let sf = self.off.sf;
         self.cpu();
         sign_bit(&mut self.body, R, size);
         self.body.push(W::I32Store8(MemArg { offset: sf, align: 0, memory_index: 0 }));
-        // pf = popcnt(R & 0xff) & 1 == 0
+    }
+    fn emit_pf(&mut self) {
+        if self.flag_mask & FPF == 0 {
+            return;
+        }
+        let pf = self.off.pf;
         self.cpu();
         self.body.push(W::LocalGet(R));
         self.body.push(W::I32WrapI64);
@@ -304,70 +330,66 @@ impl Asm {
         self.body.push(W::I32And);
         self.body.push(W::I32Eqz);
         self.body.push(W::I32Store8(MemArg { offset: pf, align: 0, memory_index: 0 }));
-        // cf
-        self.cpu();
-        if sub {
-            // a < b
-            self.body.push(W::LocalGet(A));
-            self.body.push(W::LocalGet(B));
-            self.body.push(W::I64LtU);
-        } else if size == 8 {
-            // (a+b) < a  （R はマスク済みで size8 ではそのまま）
-            self.body.push(W::LocalGet(R));
-            self.body.push(W::LocalGet(A));
-            self.body.push(W::I64LtU);
-        } else {
-            // a+b > mask  → (a+b) をマスク前で作る
-            self.body.push(W::LocalGet(A));
-            self.body.push(W::LocalGet(B));
-            self.body.push(W::I64Add);
-            self.body.push(W::I64Const(((1u64 << (size * 8)) - 1) as i64));
-            self.body.push(W::I64GtU);
+    }
+    /// A, B（引数、マスク済み）と R（結果、マスク済み）から add/sub のフラグを書く
+    fn flags_addsub(&mut self, sub: bool, size: usize) {
+        self.emit_zf();
+        self.emit_sf(size);
+        self.emit_pf();
+        if self.flag_mask & FCF != 0 {
+            let cf = self.off.cf;
+            self.cpu();
+            if sub {
+                self.body.push(W::LocalGet(A));
+                self.body.push(W::LocalGet(B));
+                self.body.push(W::I64LtU);
+            } else if size == 8 {
+                self.body.push(W::LocalGet(R));
+                self.body.push(W::LocalGet(A));
+                self.body.push(W::I64LtU);
+            } else {
+                self.body.push(W::LocalGet(A));
+                self.body.push(W::LocalGet(B));
+                self.body.push(W::I64Add);
+                self.body.push(W::I64Const(((1u64 << (size * 8)) - 1) as i64));
+                self.body.push(W::I64GtU);
+            }
+            self.body.push(W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 }));
         }
-        self.body.push(W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 }));
-        // of
-        self.cpu();
-        // sa=sign(A), sb=sign(B), sr=sign(R)
-        sign_bit(&mut self.body, A, size); // sa
-        sign_bit(&mut self.body, B, size); // sb
-        if sub {
-            self.body.push(W::I32Ne); // sa!=sb
-        } else {
-            self.body.push(W::I32Eq); // sa==sb
+        if self.flag_mask & FOF != 0 {
+            let of = self.off.of;
+            self.cpu();
+            sign_bit(&mut self.body, A, size);
+            sign_bit(&mut self.body, B, size);
+            if sub {
+                self.body.push(W::I32Ne);
+            } else {
+                self.body.push(W::I32Eq);
+            }
+            sign_bit(&mut self.body, R, size);
+            sign_bit(&mut self.body, A, size);
+            self.body.push(W::I32Ne);
+            self.body.push(W::I32And);
+            self.body.push(W::I32Store8(MemArg { offset: of, align: 0, memory_index: 0 }));
         }
-        sign_bit(&mut self.body, R, size); // sr
-        sign_bit(&mut self.body, A, size); // sa
-        self.body.push(W::I32Ne); // sr!=sa
-        self.body.push(W::I32And);
-        self.body.push(W::I32Store8(MemArg { offset: of, align: 0, memory_index: 0 }));
     }
     /// R（マスク済み）から logic（and/or/xor/test）のフラグ（cf=0, of=0, zf, sf, pf）
     fn flags_logic(&mut self, size: usize) {
-        let o = &self.off;
-        let (cf, zf, sf, of, pf) = (o.cf, o.zf, o.sf, o.of, o.pf);
-        self.cpu();
-        self.body.push(W::I32Const(0));
-        self.body.push(W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 }));
-        self.cpu();
-        self.body.push(W::I32Const(0));
-        self.body.push(W::I32Store8(MemArg { offset: of, align: 0, memory_index: 0 }));
-        self.cpu();
-        self.body.push(W::LocalGet(R));
-        self.body.push(W::I64Eqz);
-        self.body.push(W::I32Store8(MemArg { offset: zf, align: 0, memory_index: 0 }));
-        self.cpu();
-        sign_bit(&mut self.body, R, size);
-        self.body.push(W::I32Store8(MemArg { offset: sf, align: 0, memory_index: 0 }));
-        self.cpu();
-        self.body.push(W::LocalGet(R));
-        self.body.push(W::I32WrapI64);
-        self.body.push(W::I32Const(0xff));
-        self.body.push(W::I32And);
-        self.body.push(W::I32Popcnt);
-        self.body.push(W::I32Const(1));
-        self.body.push(W::I32And);
-        self.body.push(W::I32Eqz);
-        self.body.push(W::I32Store8(MemArg { offset: pf, align: 0, memory_index: 0 }));
+        if self.flag_mask & FCF != 0 {
+            let cf = self.off.cf;
+            self.cpu();
+            self.body.push(W::I32Const(0));
+            self.body.push(W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 }));
+        }
+        if self.flag_mask & FOF != 0 {
+            let of = self.off.of;
+            self.cpu();
+            self.body.push(W::I32Const(0));
+            self.body.push(W::I32Store8(MemArg { offset: of, align: 0, memory_index: 0 }));
+        }
+        self.emit_zf();
+        self.emit_sf(size);
+        self.emit_pf();
     }
     /// 条件コードを i32（0/1）で積む
     fn push_cond(&mut self, c: ConditionCode) {
@@ -560,15 +582,8 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
             asm.body.push(if m == M::Dec { W::I64Sub } else { W::I64Add });
             mask_i64(&mut asm.body, size);
             asm.body.push(W::LocalSet(R));
-            // cf を退避（GA を一時に使う）→ フラグを書く → cf を戻す（inc/dec は cf を変えない）
-            let cf = asm.off.cf;
-            asm.body.push(W::LocalGet(CPU));
-            asm.body.push(W::I32Load8U(MemArg { offset: cf, align: 0, memory_index: 0 }));
-            asm.body.push(W::LocalSet(GA));
+            // inc/dec は cf を変えない。flags_addsub は mask に cf を含めない前提（生死解析で除く）
             asm.flags_addsub(m == M::Dec, size);
-            asm.cpu();
-            asm.body.push(W::LocalGet(GA));
-            asm.body.push(W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 }));
             asm.body.push(W::LocalGet(R));
             emit_store_dst(asm, i, size, insn_addr, count)
         }
@@ -598,7 +613,55 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
             asm.body.push(W::LocalGet(R));
             emit_store_dst(asm, i, size, insn_addr, count)
         }
-        _ => None,
+        M::Bt | M::Bts | M::Btr | M::Btc => {
+            // 引数 0 がレジスタのときだけ（メモリはインタープリター）
+            if i.op_kind(0) != OpKind::Register {
+                return None;
+            }
+            let size = dst_size(i);
+            let (idx, _) = gpr(i.op_register(0))?;
+            // A = dst（マスク）
+            asm.load_reg(idx);
+            mask_i64(&mut asm.body, size);
+            asm.body.push(W::LocalSet(A));
+            // B = ビットの位置 = src % (size*8)
+            let src = operand(i, 1)?;
+            asm.push_operand(&src, insn_addr, count);
+            asm.body.push(W::I64Const((size as i64) * 8));
+            asm.body.push(W::I64RemU);
+            asm.body.push(W::LocalSet(B));
+            // R = 1 << B（ビット）
+            asm.body.push(W::I64Const(1));
+            asm.body.push(W::LocalGet(B));
+            asm.body.push(W::I64Shl);
+            asm.body.push(W::LocalSet(R));
+            // cf = (A & bit) != 0
+            asm.cpu();
+            asm.body.push(W::LocalGet(A));
+            asm.body.push(W::LocalGet(R));
+            asm.body.push(W::I64And);
+            asm.body.push(W::I64Const(0));
+            asm.body.push(W::I64Ne);
+            asm.body.push(W::I32Store8(MemArg { offset: asm.off.cf, align: 0, memory_index: 0 }));
+            // bt 以外は dst を更新
+            if m != M::Bt {
+                asm.body.push(W::LocalGet(A));
+                asm.body.push(W::LocalGet(R));
+                match m {
+                    M::Bts => asm.body.push(W::I64Or),
+                    M::Btr => {
+                        asm.body.push(W::I64Const(-1));
+                        asm.body.push(W::I64Xor); // ~bit
+                        asm.body.push(W::I64And);
+                    }
+                    _ => asm.body.push(W::I64Xor), // btc
+                }
+                mask_i64(&mut asm.body, size);
+                asm.store_reg(idx, size);
+            }
+            Some(())
+        }
+        _ => emit_sse(asm, i, insn_addr, count),
     }
 }
 
@@ -617,74 +680,460 @@ pub struct Compiled {
     pub body: Vec<W<'static>>,
 }
 
+/// ブロックの終わり方
+enum Term {
+    /// この番地に rip を置いて戻る（count は実行済みの数）
+    ExitAt(u64),
+    /// 無条件分岐
+    Jmp(u64),
+    /// 条件分岐（条件コード, 飛び先, 次）
+    Jcc(ConditionCode, u64, u64),
+}
+
+/// その命令が JIT で変換できるか（できるなら書き込むフラグのビット）。できないなら None。
+/// 本体の命令にフラグを読むもの（adc、setcc など）は無いので、読みは考えない
+fn insn_flags(i: &Instruction) -> Option<u8> {
+    use M::*;
+    Some(match i.mnemonic() {
+        Mov | Movzx | Movsx | Movsxd | Lea | Not | Nop | Endbr64 => 0,
+        Add | Sub | Neg | Cmp => FALL,
+        And | Or | Xor | Test => FALL,
+        Inc | Dec => FZF | FSF | FOF | FPF,
+        Bt | Bts | Btr | Btc => FCF,
+        // SSE（フラグを書かない移動・算術・ビット演算）
+        Movss | Movsd | Movaps | Movups | Movdqa | Movdqu | Movapd | Movupd => 0,
+        Addss | Subss | Mulss | Divss | Minss | Maxss | Sqrtss => 0,
+        Addsd | Subsd | Mulsd | Divsd | Minsd | Maxsd | Sqrtsd => 0,
+        Addps | Subps | Mulps | Divps | Addpd | Subpd | Mulpd | Divpd => 0,
+        Pxor | Xorps | Xorpd | Pand | Andps | Andpd | Por | Orps | Orpd | Pandn | Andnps | Andnpd => 0,
+        Comiss | Ucomiss | Comisd | Ucomisd => FALL,
+        _ => return None,
+    })
+}
+
 /// start から基本ブロックを変換する。pages_ptr はページ表の先頭（ホストの番地、i32）
 pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> Option<Compiled> {
-    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), bits };
+    // 第 1 パス: 命令を集めて、終わり方を決める
+    let mut insns: Vec<Instruction> = Vec::new();
     let mut rip = start;
-    let mut count: u32 = 0;
+    let term;
     loop {
         let bytes = mem.fetch(rip, 16).ok()?;
         let mut dec = Decoder::with_ip(bits, bytes, rip, DecoderOptions::NONE);
         let insn = dec.decode();
         if insn.is_invalid() {
+            if insns.is_empty() {
+                return None;
+            }
+            term = Term::ExitAt(rip);
             break;
         }
         let next = insn.next_ip();
-        let flow = insn.flow_control();
-        // 分岐で終わる
-        if flow != FlowControl::Next {
-            match insn.mnemonic() {
-                M::Jmp if matches!(insn.op_kind(0), OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64) => {
-                    asm.emit_exit(insn.near_branch_target(), count + 1);
+        if insn.flow_control() != FlowControl::Next {
+            if insn.mnemonic() == M::Jmp && matches!(insn.op_kind(0), OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64) {
+                term = Term::Jmp(insn.near_branch_target());
+            } else if is_jcc(&insn) {
+                term = Term::Jcc(insn.condition_code(), insn.near_branch_target(), next);
+            } else {
+                if insns.is_empty() {
+                    return None;
                 }
-                _ if is_jcc(&insn) => {
-                    let target = insn.near_branch_target();
-                    // rip = cond ? target : next（Select）
-                    asm.cpu();
-                    asm.body.push(W::I64Const(target as i64));
-                    asm.body.push(W::I64Const(next as i64));
-                    asm.push_cond(insn.condition_code());
-                    asm.body.push(W::Select);
-                    asm.body.push(W::I64Store(MemArg { offset: asm.off.rip, align: 3, memory_index: 0 }));
-                    asm.body.push(W::I32Const((count + 1) as i32));
-                    asm.body.push(W::Return);
-                }
-                _ => {
-                    // call/ret/その他の分岐はインタープリターに任せる（この命令の手前で終える）
-                    if count == 0 {
-                        return None;
-                    }
-                    asm.emit_exit(rip, count);
-                }
+                term = Term::ExitAt(rip);
             }
-            return Some(finish(asm));
+            break;
         }
-        // 普通の命令
-        if emit_insn(&mut asm, &insn, rip, count).is_none() {
-            if count == 0 {
+        if insn_flags(&insn).is_none() {
+            if insns.is_empty() {
                 return None;
             }
-            asm.emit_exit(rip, count);
-            return Some(finish(asm));
+            term = Term::ExitAt(rip);
+            break;
         }
-        count += 1;
+        insns.push(insn);
         rip = next;
-        if count as usize >= max_block {
-            asm.emit_exit(rip, count);
-            return Some(finish(asm));
+        if insns.len() >= max_block {
+            term = Term::ExitAt(rip);
+            break;
         }
     }
-    if count == 0 {
-        return None;
+    // フラグの生死（後ろ向き。ブロック末では全フラグ生存とみなす。本体にフラグを読む命令は無いので、後で上書きされるフラグは不要）
+    let n = insns.len();
+    let mut live = vec![0u8; n];
+    let mut seen = 0u8;
+    for k in (0..n).rev() {
+        let w = insn_flags(&insns[k]).unwrap_or(0);
+        live[k] = w & !seen;
+        seen |= w;
     }
-    asm.emit_exit(rip, count);
+    // 第 2 パス: 生成
+    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), bits, flag_mask: FALL };
+    for (k, insn) in insns.iter().enumerate() {
+        asm.flag_mask = live[k];
+        if emit_insn(&mut asm, insn, insn.ip(), k as u32).is_none() {
+            // insn_flags が対応と判断したのに生成できない → 安全のためこのブロックは作らない
+            return None;
+        }
+    }
+    let count = n as u32;
+    match term {
+        Term::ExitAt(a) => asm.emit_exit(a, count),
+        Term::Jmp(t) => asm.emit_exit(t, count),
+        Term::Jcc(cc, t, next) => {
+            asm.cpu();
+            asm.body.push(W::I64Const(t as i64));
+            asm.body.push(W::I64Const(next as i64));
+            asm.push_cond(cc);
+            asm.body.push(W::Select);
+            asm.body.push(W::I64Store(MemArg { offset: asm.off.rip, align: 3, memory_index: 0 }));
+            asm.body.push(W::I32Const(count as i32));
+            asm.body.push(W::Return);
+        }
+    }
     Some(finish(asm))
 }
 
 fn finish(asm: Asm) -> Compiled {
-    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32)], body: asm.body }
+    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64)], body: asm.body }
 }
 
 fn is_jcc(i: &Instruction) -> bool {
     matches!(i.code(), c if (Code::Jo_rel8_16..=Code::Jg_rel32_64).contains(&c)) && i.condition_code() != ConditionCode::None && i.mnemonic() != M::Jmp
+}
+
+/// 引数 op（xmm レジスタかメモリ）の先頭を指す i32 ホスト番地をスタックに積む。戻りは「16 で整列しているか」
+fn xmm_ptr(asm: &mut Asm, i: &Instruction, n: u32, size: usize, insn_addr: u64, count: u32) -> Option<bool> {
+    match i.op_kind(n) {
+        OpKind::Register => {
+            let idx = crate::cpu::xmm_index(i.op_register(n)).ok()?;
+            asm.cpu();
+            asm.body.push(W::I32Const(off_xmm(idx) as i32));
+            asm.body.push(W::I32Add);
+            Some(true)
+        }
+        OpKind::Memory => {
+            let Opnd::Mem(mo, _) = operand(i, n)? else { return None };
+            asm.calc_addr(&mo);
+            asm.resolve_ptr(size, insn_addr, count);
+            asm.body.push(W::LocalGet(HP));
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+fn f32ld(al: bool) -> W<'static> {
+    W::F32Load(MemArg { offset: 0, align: if al { 2 } else { 0 }, memory_index: 0 })
+}
+fn f64ld(al: bool) -> W<'static> {
+    W::F64Load(MemArg { offset: 0, align: if al { 3 } else { 0 }, memory_index: 0 })
+}
+fn v128ld(al: bool) -> W<'static> {
+    W::V128Load(MemArg { offset: 0, align: if al { 4 } else { 0 }, memory_index: 0 })
+}
+fn xmm_dst(i: &Instruction) -> Option<usize> {
+    if i.op_kind(0) != OpKind::Register {
+        return None;
+    }
+    crate::cpu::xmm_index(i.op_register(0)).ok()
+}
+
+/// SSE の命令を変換する（対応しないなら None）
+fn emit_sse(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Option<()> {
+    let m = i.mnemonic();
+    match m {
+        // スカラ 32 ビットの移動（movss）
+        M::Movss => {
+            match (i.op_kind(0), i.op_kind(1)) {
+                (OpKind::Register, OpKind::Register) => {
+                    // 上位を残して低 32 ビットを写す
+                    let d = crate::cpu::xmm_index(i.op_register(0)).ok()?;
+                    let s = crate::cpu::xmm_index(i.op_register(1)).ok()?;
+                    asm.cpu();
+                    asm.cpu();
+                    asm.body.push(W::F32Load(MemArg { offset: off_xmm(s), align: 2, memory_index: 0 }));
+                    asm.body.push(W::F32Store(MemArg { offset: off_xmm(d), align: 2, memory_index: 0 }));
+                    Some(())
+                }
+                (OpKind::Register, OpKind::Memory) => {
+                    // 上位を 0 にして低 32 ビットに読み込む
+                    let d = crate::cpu::xmm_index(i.op_register(0)).ok()?;
+                    asm.cpu();
+                    asm.body.push(W::V128Const(0));
+                    asm.body.push(W::V128Store(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+                    asm.cpu();
+                    let al = xmm_ptr(asm, i, 1, 4, insn_addr, count)?;
+                    asm.body.push(f32ld(al));
+                    asm.body.push(W::F32Store(MemArg { offset: off_xmm(d), align: 2, memory_index: 0 }));
+                    Some(())
+                }
+                (OpKind::Memory, OpKind::Register) => {
+                    let s = crate::cpu::xmm_index(i.op_register(1)).ok()?;
+                    let al = xmm_ptr(asm, i, 0, 4, insn_addr, count)?;
+                    asm.cpu();
+                    asm.body.push(W::F32Load(MemArg { offset: off_xmm(s), align: 2, memory_index: 0 }));
+                    asm.body.push(W::F32Store(MemArg { offset: 0, align: if al { 2 } else { 0 }, memory_index: 0 }));
+                    Some(())
+                }
+                _ => None,
+            }
+        }
+        // スカラ 64 ビットの移動（movsd）
+        M::Movsd => {
+            match (i.op_kind(0), i.op_kind(1)) {
+                (OpKind::Register, OpKind::Register) => {
+                    let d = crate::cpu::xmm_index(i.op_register(0)).ok()?;
+                    let s = crate::cpu::xmm_index(i.op_register(1)).ok()?;
+                    asm.cpu();
+                    asm.cpu();
+                    asm.body.push(W::F64Load(MemArg { offset: off_xmm(s), align: 3, memory_index: 0 }));
+                    asm.body.push(W::F64Store(MemArg { offset: off_xmm(d), align: 3, memory_index: 0 }));
+                    Some(())
+                }
+                (OpKind::Register, OpKind::Memory) => {
+                    let d = crate::cpu::xmm_index(i.op_register(0)).ok()?;
+                    asm.cpu();
+                    asm.body.push(W::V128Const(0));
+                    asm.body.push(W::V128Store(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+                    asm.cpu();
+                    let al = xmm_ptr(asm, i, 1, 8, insn_addr, count)?;
+                    asm.body.push(f64ld(al));
+                    asm.body.push(W::F64Store(MemArg { offset: off_xmm(d), align: 3, memory_index: 0 }));
+                    Some(())
+                }
+                (OpKind::Memory, OpKind::Register) => {
+                    let s = crate::cpu::xmm_index(i.op_register(1)).ok()?;
+                    let al = xmm_ptr(asm, i, 0, 8, insn_addr, count)?;
+                    asm.cpu();
+                    asm.body.push(W::F64Load(MemArg { offset: off_xmm(s), align: 3, memory_index: 0 }));
+                    asm.body.push(W::F64Store(MemArg { offset: 0, align: if al { 3 } else { 0 }, memory_index: 0 }));
+                    Some(())
+                }
+                _ => None,
+            }
+        }
+        // 128 ビットの移動
+        M::Movaps | M::Movups | M::Movdqa | M::Movdqu | M::Movapd | M::Movupd => {
+            if let Some(d) = xmm_dst(i) {
+                asm.cpu(); // store 先
+                let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+                asm.body.push(v128ld(al));
+                asm.body.push(W::V128Store(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+                Some(())
+            } else if i.op_kind(1) == OpKind::Register {
+                // メモリ ← xmm
+                let s = crate::cpu::xmm_index(i.op_register(1)).ok()?;
+                let al = xmm_ptr(asm, i, 0, 16, insn_addr, count)?; // dst のメモリ番地
+                asm.cpu();
+                asm.body.push(W::V128Load(MemArg { offset: off_xmm(s), align: 4, memory_index: 0 }));
+                asm.body.push(W::V128Store(MemArg { offset: 0, align: if al { 4 } else { 0 }, memory_index: 0 }));
+                Some(())
+            } else {
+                None
+            }
+        }
+        // スカラ 32 ビット float の二項演算
+        M::Addss | M::Subss | M::Mulss | M::Divss | M::Minss | M::Maxss | M::Sqrtss => {
+            let d = xmm_dst(i)?;
+            asm.cpu();
+            asm.body.push(W::F32Load(MemArg { offset: off_xmm(d), align: 2, memory_index: 0 }));
+            asm.body.push(W::LocalSet(F0));
+            let al = xmm_ptr(asm, i, 1, 4, insn_addr, count)?;
+            asm.body.push(f32ld(al));
+            asm.body.push(W::LocalSet(F1));
+            asm.cpu();
+            match m {
+                M::Sqrtss => {
+                    asm.body.push(W::LocalGet(F1));
+                    asm.body.push(W::F32Sqrt);
+                }
+                M::Minss | M::Maxss => {
+                    asm.body.push(W::LocalGet(F0));
+                    asm.body.push(W::LocalGet(F1));
+                    asm.body.push(W::LocalGet(F0));
+                    asm.body.push(W::LocalGet(F1));
+                    asm.body.push(if m == M::Minss { W::F32Lt } else { W::F32Gt });
+                    asm.body.push(W::Select);
+                }
+                _ => {
+                    asm.body.push(W::LocalGet(F0));
+                    asm.body.push(W::LocalGet(F1));
+                    asm.body.push(match m {
+                        M::Addss => W::F32Add,
+                        M::Subss => W::F32Sub,
+                        M::Mulss => W::F32Mul,
+                        _ => W::F32Div,
+                    });
+                }
+            }
+            asm.body.push(W::F32Store(MemArg { offset: off_xmm(d), align: 2, memory_index: 0 }));
+            Some(())
+        }
+        // スカラ 64 ビット float
+        M::Addsd | M::Subsd | M::Mulsd | M::Divsd | M::Minsd | M::Maxsd | M::Sqrtsd => {
+            let d = xmm_dst(i)?;
+            asm.cpu();
+            asm.body.push(W::F64Load(MemArg { offset: off_xmm(d), align: 3, memory_index: 0 }));
+            asm.body.push(W::LocalSet(D0));
+            let al = xmm_ptr(asm, i, 1, 8, insn_addr, count)?;
+            asm.body.push(f64ld(al));
+            asm.body.push(W::LocalSet(D1));
+            asm.cpu();
+            match m {
+                M::Sqrtsd => {
+                    asm.body.push(W::LocalGet(D1));
+                    asm.body.push(W::F64Sqrt);
+                }
+                M::Minsd | M::Maxsd => {
+                    asm.body.push(W::LocalGet(D0));
+                    asm.body.push(W::LocalGet(D1));
+                    asm.body.push(W::LocalGet(D0));
+                    asm.body.push(W::LocalGet(D1));
+                    asm.body.push(if m == M::Minsd { W::F64Lt } else { W::F64Gt });
+                    asm.body.push(W::Select);
+                }
+                _ => {
+                    asm.body.push(W::LocalGet(D0));
+                    asm.body.push(W::LocalGet(D1));
+                    asm.body.push(match m {
+                        M::Addsd => W::F64Add,
+                        M::Subsd => W::F64Sub,
+                        M::Mulsd => W::F64Mul,
+                        _ => W::F64Div,
+                    });
+                }
+            }
+            asm.body.push(W::F64Store(MemArg { offset: off_xmm(d), align: 3, memory_index: 0 }));
+            Some(())
+        }
+        // packed 32 ビット float
+        M::Addps | M::Subps | M::Mulps | M::Divps => {
+            let d = xmm_dst(i)?;
+            asm.cpu(); // store 先
+            asm.cpu();
+            asm.body.push(W::V128Load(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+            let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+            asm.body.push(v128ld(al));
+            asm.body.push(match m {
+                M::Addps => W::F32x4Add,
+                M::Subps => W::F32x4Sub,
+                M::Mulps => W::F32x4Mul,
+                _ => W::F32x4Div,
+            });
+            asm.body.push(W::V128Store(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+            Some(())
+        }
+        // packed 64 ビット float
+        M::Addpd | M::Subpd | M::Mulpd | M::Divpd => {
+            let d = xmm_dst(i)?;
+            asm.cpu();
+            asm.cpu();
+            asm.body.push(W::V128Load(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+            let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+            asm.body.push(v128ld(al));
+            asm.body.push(match m {
+                M::Addpd => W::F64x2Add,
+                M::Subpd => W::F64x2Sub,
+                M::Mulpd => W::F64x2Mul,
+                _ => W::F64x2Div,
+            });
+            asm.body.push(W::V128Store(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+            Some(())
+        }
+        // 128 ビットのビット演算
+        M::Pxor | M::Xorps | M::Xorpd | M::Pand | M::Andps | M::Andpd | M::Por | M::Orps | M::Orpd | M::Pandn | M::Andnps | M::Andnpd => {
+            let d = xmm_dst(i)?;
+            asm.cpu(); // store 先
+            if matches!(m, M::Pandn | M::Andnps | M::Andnpd) {
+                // ~dst & src = AndNot(src, dst)
+                let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+                asm.body.push(v128ld(al));
+                asm.cpu();
+                asm.body.push(W::V128Load(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+                asm.body.push(W::V128AndNot);
+            } else {
+                asm.cpu();
+                asm.body.push(W::V128Load(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+                let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+                asm.body.push(v128ld(al));
+                asm.body.push(match m {
+                    M::Pxor | M::Xorps | M::Xorpd => W::V128Xor,
+                    M::Pand | M::Andps | M::Andpd => W::V128And,
+                    _ => W::V128Or,
+                });
+            }
+            asm.body.push(W::V128Store(MemArg { offset: off_xmm(d), align: 4, memory_index: 0 }));
+            Some(())
+        }
+        // 比較（フラグ）。zf=un||a==b, pf=un, cf=un||a<b, sf=of=0
+        M::Comiss | M::Ucomiss | M::Comisd | M::Ucomisd => {
+            let d = crate::cpu::xmm_index(i.op_register(0)).ok()?;
+            let ss = matches!(m, M::Comiss | M::Ucomiss);
+            if ss {
+                asm.cpu();
+                asm.body.push(W::F32Load(MemArg { offset: off_xmm(d), align: 2, memory_index: 0 }));
+                asm.body.push(W::F64PromoteF32);
+                asm.body.push(W::LocalSet(D0));
+                let al = xmm_ptr(asm, i, 1, 4, insn_addr, count)?;
+                asm.body.push(f32ld(al));
+                asm.body.push(W::F64PromoteF32);
+                asm.body.push(W::LocalSet(D1));
+            } else {
+                asm.cpu();
+                asm.body.push(W::F64Load(MemArg { offset: off_xmm(d), align: 3, memory_index: 0 }));
+                asm.body.push(W::LocalSet(D0));
+                let al = xmm_ptr(asm, i, 1, 8, insn_addr, count)?;
+                asm.body.push(f64ld(al));
+                asm.body.push(W::LocalSet(D1));
+            }
+            let (cf, zf, sf, of, pf) = (asm.off.cf, asm.off.zf, asm.off.sf, asm.off.of, asm.off.pf);
+            // un = (a!=a)|(b!=b)
+            // zf = un | (a==b)
+            asm.cpu();
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::F64Ne);
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::F64Ne);
+            asm.body.push(W::I32Or); // un
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::F64Eq);
+            asm.body.push(W::I32Or);
+            asm.body.push(W::I32Store8(MemArg { offset: zf, align: 0, memory_index: 0 }));
+            // pf = un
+            asm.cpu();
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::F64Ne);
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::F64Ne);
+            asm.body.push(W::I32Or);
+            asm.body.push(W::I32Store8(MemArg { offset: pf, align: 0, memory_index: 0 }));
+            // cf = un | (a<b)
+            asm.cpu();
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::F64Ne);
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::F64Ne);
+            asm.body.push(W::I32Or);
+            asm.body.push(W::LocalGet(D0));
+            asm.body.push(W::LocalGet(D1));
+            asm.body.push(W::F64Lt);
+            asm.body.push(W::I32Or);
+            asm.body.push(W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 }));
+            // sf=0, of=0
+            asm.cpu();
+            asm.body.push(W::I32Const(0));
+            asm.body.push(W::I32Store8(MemArg { offset: sf, align: 0, memory_index: 0 }));
+            asm.cpu();
+            asm.body.push(W::I32Const(0));
+            asm.body.push(W::I32Store8(MemArg { offset: of, align: 0, memory_index: 0 }));
+            Some(())
+        }
+        _ => None,
+    }
 }

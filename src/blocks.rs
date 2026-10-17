@@ -133,6 +133,7 @@ impl Emu {
                     let cpu_ptr = (&mut self.cpu as *mut crate::cpu::Cpu) as usize as u32;
                     let n = f(cpu_ptr);
                     self.cpu.steps += n as u64;
+                    self.jit_insns += n as u64;
                     if self.cpu.jit_bail != 0 {
                         // メモリの遅い道。その 1 命令だけインタープリターで進める
                         self.cpu.jit_bail = 0;
@@ -174,6 +175,7 @@ impl Emu {
                 }
             }
             self.cpu.steps += done;
+            self.interp_insns += done;
             if self.cpu.steps - self.call_start > self.max_steps {
                 return Err(Fault(format!("step limit (rip={:#x})", self.cpu.rip)));
             }

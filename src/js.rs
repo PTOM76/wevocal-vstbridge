@@ -40,6 +40,17 @@ impl JsVst {
         matches!(self.0, Plugin::X86(_))
     }
 
+    /// JIT で実行した命令の割合（調査用。0..1）
+    #[wasm_bindgen(js_name = jitCoverage)]
+    pub fn jit_coverage(&self) -> f64 {
+        let e = match &self.0 {
+            Plugin::X86(v) => &v.emu,
+            Plugin::X64(v) => &v.emu,
+        };
+        let t = e.jit_insns + e.interp_insns;
+        if t == 0 { 0.0 } else { e.jit_insns as f64 / t as f64 }
+    }
+
     pub fn name(&mut self) -> Result<String, JsError> {
         match &mut self.0 {
             Plugin::X64(v) => v.name(),
