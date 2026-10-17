@@ -4,11 +4,20 @@
 use crate::emu::{Emu, HostFn};
 use crate::mem::R;
 
-/// スタックから n 番目の引数（1 始まり）を読む。ホストの関数が呼ばれる時点では、戻り先はもう pop 済みで、
-/// esp は 1 番目の引数を指している（emu.rs の run() の決まり）
+/// n 番目の引数（1 始まり）を読む。ホストの関数が呼ばれる時点では、戻り先はもう pop 済み（emu.rs の try_thunk）。
+/// 32 ビットは stdcall で、esp が 1 番目の引数を指す。64 ビットは rcx、rdx、r8、r9 のあと、シャドウ領域（32 バイト）の後ろのスタック
 pub(crate) fn arg(e: &Emu, n: u64) -> R<u64> {
-    let esp = e.cpu.regs[crate::cpu::RSP];
-    e.mem.read_n(esp + (n - 1) * 4, 4)
+    let sp = e.cpu.regs[crate::cpu::RSP];
+    if e.bits == 64 {
+        return match n {
+            1 => Ok(e.cpu.regs[1]),
+            2 => Ok(e.cpu.regs[2]),
+            3 => Ok(e.cpu.regs[8]),
+            4 => Ok(e.cpu.regs[9]),
+            _ => e.mem.read_n(sp + 0x20 + (n - 5) * 8, 8),
+        };
+    }
+    e.mem.read_n(sp + (n - 1) * 4, 4)
 }
 
 /// stdcall の API の引数の数。載っていないものは 0（片付けなし）。Windows の公開されている関数の仕様どおり
@@ -36,17 +45,14 @@ pub fn arg_count(name: &str) -> u64 {
 pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
     let dll = dll.to_ascii_uppercase();
     match (dll.as_str(), name) {
-        ("KERNEL32.DLL", "LoadLibraryA") => Some(Box::new(|e: &mut Emu| -> R<u64> {
-            // LoadLibraryA(name)。本物の読み込みはせず、名前を覚えて偽のハンドルを返す（GetProcAddress で名前に戻す）
-            let name = e.mem.read_cstr(arg(e, 1)?, 260)?.to_ascii_uppercase();
-            let idx = match e.loaded.iter().position(|n| *n == name) {
-                Some(i) => i,
-                None => {
-                    e.loaded.push(name);
-                    e.loaded.len() - 1
-                }
-            };
-            Ok(0x7000_0000 + idx as u64 * 0x1_0000)
+        // LoadLibrary(name)。本物の読み込みはせず、名前を覚えて偽のハンドルを返す（GetProcAddress で名前に戻す）
+        ("KERNEL32.DLL", "LoadLibraryA" | "LoadLibraryExA") => Some(Box::new(|e: &mut Emu| -> R<u64> {
+            let name = e.mem.read_cstr(arg(e, 1)?, 260)?;
+            Ok(fake_module(e, &name))
+        })),
+        ("KERNEL32.DLL", "LoadLibraryW" | "LoadLibraryExW") => Some(Box::new(|e: &mut Emu| -> R<u64> {
+            let name = read_wstr(e, arg(e, 1)?)?;
+            Ok(fake_module(e, &name))
         })),
         ("KERNEL32.DLL", "GetProcAddress") => Some(Box::new(|e: &mut Emu| -> R<u64> {
             // GetProcAddress(handle, name)。ハンドルから DLL 名を引き、関数名があれば入口を作って返す
@@ -132,9 +138,9 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         // 文字の変換。ランタイムの初期化で呼ばれる程度なので、1 バイト文字（ASCII）として写すだけ
         ("KERNEL32.DLL", "MultiByteToWideChar") => Some(Box::new(|e: &mut Emu| -> R<u64> {
             // (cp, flags, src, srclen, dst, dstlen)。srclen が -1 なら 0 終端まで（0 を含む）
-            let (src, srclen, dst, dstlen) = (arg(e, 3)?, arg(e, 4)? as i32, arg(e, 5)?, arg(e, 6)? as usize);
+            let (src, srclen, dst, dstlen) = (arg(e, 3)?, arg(e, 4)? as i32, arg(e, 5)?, arg(e, 6)? as u32 as usize);
             let n = if srclen < 0 { e.mem.read_cstr(src, 4096)?.len() + 1 } else { srclen as usize };
-            if dstlen == 0 {
+            if dstlen == 0 || dst == 0 {
                 return Ok(n as u64);
             }
             for i in 0..n.min(dstlen) {
@@ -145,7 +151,7 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         })),
         ("KERNEL32.DLL", "WideCharToMultiByte") => Some(Box::new(|e: &mut Emu| -> R<u64> {
             // (cp, flags, src, srclen, dst, dstlen, defchar, usedefchar)
-            let (src, srclen, dst, dstlen) = (arg(e, 3)?, arg(e, 4)? as i32, arg(e, 5)?, arg(e, 6)? as usize);
+            let (src, srclen, dst, dstlen) = (arg(e, 3)?, arg(e, 4)? as i32, arg(e, 5)?, arg(e, 6)? as u32 as usize);
             let mut n = 0usize;
             if srclen < 0 {
                 while e.mem.read_n(src + n as u64 * 2, 2)? != 0 {
@@ -155,7 +161,7 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
             } else {
                 n = srclen as usize;
             }
-            if dstlen == 0 {
+            if dstlen == 0 || dst == 0 {
                 return Ok(n as u64);
             }
             for i in 0..n.min(dstlen) {
@@ -191,22 +197,20 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
             }
             Ok(1)
         })),
-        ("KERNEL32.DLL", "LCMapStringA" | "LCMapStringW") => Some(Box::new(|e: &mut Emu| -> R<u64> {
-            // (locale, flags, src, srclen, dst, dstlen)。変換はせず写すだけ（長さが 0 なら必要な長さ）
-            let (src, srclen, dst, dstlen) = (arg(e, 3)?, arg(e, 4)? as i32, arg(e, 5)?, arg(e, 6)? as usize);
-            let n = if srclen < 0 { e.mem.read_cstr(src, 4096)?.len() + 1 } else { srclen as usize };
-            if dstlen == 0 {
-                return Ok(n as u64);
-            }
-            let m = n.min(dstlen);
-            let mut buf = vec![0u8; m];
-            e.mem.read(src, &mut buf)?;
-            e.mem.write(dst, &buf)?;
-            Ok(m as u64)
-        })),
+        ("KERNEL32.DLL", "LCMapStringA") => Some(Box::new(|e: &mut Emu| -> R<u64> { lc_map(e, 1) })),
+        ("KERNEL32.DLL", "LCMapStringW") => Some(Box::new(|e: &mut Emu| -> R<u64> { lc_map(e, 2) })),
         // CPU の機能（SSE2 など）は全部「無い」と答え、最小の命令だけで動くようにする
         ("KERNEL32.DLL", "IsProcessorFeaturePresent") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0) })),
-        ("KERNEL32.DLL", "GetModuleHandleA") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0x1000_0000) })),
+        ("KERNEL32.DLL", "GetModuleHandleA") => Some(Box::new(|e: &mut Emu| -> R<u64> {
+            let p = arg(e, 1)?;
+            let name = if p == 0 { String::new() } else { e.mem.read_cstr(p, 260)? };
+            Ok(module_handle(e, p, &name))
+        })),
+        ("KERNEL32.DLL", "GetModuleHandleW") => Some(Box::new(|e: &mut Emu| -> R<u64> {
+            let p = arg(e, 1)?;
+            let name = if p == 0 { String::new() } else { read_wstr(e, p)? };
+            Ok(module_handle(e, p, &name))
+        })),
         ("KERNEL32.DLL", "GetTickCount") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0) })),
         ("KERNEL32.DLL", "Sleep") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0) })),
         // ヒープ。C のランタイムは、ヒープを作れないとその後のメモリ確保が全部失敗する（リバーブのバッファなどが空になる）
@@ -217,7 +221,7 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         ("KERNEL32.DLL", "GetVersion") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0x0A28_0105) })),
         ("KERNEL32.DLL", "HeapAlloc") => Some(Box::new(|e: &mut Emu| -> R<u64> {
             // HeapAlloc(hHeap, flags, size)。要る分だけ確保して返す（HEAP_ZERO_MEMORY は、新しい領域が 0 なのでそのまま）
-            let size = arg(e, 3)? as usize;
+            let size = arg(e, 3)? as u32 as usize;
             let at = e.mem.alloc32(size);
             e.heap_sizes.insert(at as u64, size);
             if std::env::var("VSTBRIDGE_HEAP").is_ok() {
@@ -228,7 +232,7 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         ("KERNEL32.DLL", "HeapReAlloc") => Some(Box::new(|e: &mut Emu| -> R<u64> {
             // HeapReAlloc(hHeap, flags, ptr, size)。新しく確保して、古い中身を写す
             let old = arg(e, 3)?;
-            let size = arg(e, 4)? as usize;
+            let size = arg(e, 4)? as u32 as usize;
             let at = e.mem.alloc32(size);
             let n = e.heap_sizes.get(&old).copied().unwrap_or(0).min(size);
             if n > 0 {
@@ -261,7 +265,7 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         ("KERNEL32.DLL", "TlsSetValue") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(1) })),
         // 画面（エディター）の API は gui_api.rs
         ("USER32.DLL" | "GDI32.DLL", name) => crate::gui_api::resolve(name),
-        _ => None,
+        (dll, name) => crate::win_stubs::resolve(dll, name),
     }
 }
 
@@ -291,4 +295,65 @@ fn ctype1(c: u8) -> u64 {
         | ((c == b' ' || c == 9) as u64) << 6
         | (ch.is_ascii_hexdigit() as u64) << 7
         | (ch.is_ascii_alphabetic() as u64) << 8
+}
+
+/// LCMapString(locale, flags, src, srclen, dst, dstlen)。変換はせず写すだけ（dstlen が 0 なら必要な長さ）。unit は 1 文字のバイト数（A は 1、W は 2）
+fn lc_map(e: &mut Emu, unit: usize) -> R<u64> {
+    let (src, srclen, dst, dstlen) = (arg(e, 3)?, arg(e, 4)? as i32, arg(e, 5)?, arg(e, 6)? as u32 as usize);
+    if src == 0 {
+        return Ok(0);
+    }
+    let n = if srclen >= 0 {
+        srclen as usize
+    } else {
+        // 0 で終わるまで（終わりの 0 も含める）
+        let mut k = 0;
+        while e.mem.read_n(src + (k * unit) as u64, unit)? != 0 {
+            k += 1;
+        }
+        k + 1
+    };
+    if dstlen == 0 || dst == 0 {
+        return Ok(n as u64);
+    }
+    let m = n.min(dstlen);
+    let mut buf = vec![0u8; m * unit];
+    e.mem.read(src, &mut buf)?;
+    e.mem.write(dst, &buf)?;
+    Ok(m as u64)
+}
+
+/// ワイド文字の文字列（0 で終わる）を読む
+pub(crate) fn read_wstr(e: &Emu, p: u64) -> R<String> {
+    let mut out = Vec::new();
+    for k in 0..520u64 {
+        let c = e.mem.read_n(p + k * 2, 2)? as u16;
+        if c == 0 {
+            break;
+        }
+        out.push(c);
+    }
+    Ok(String::from_utf16_lossy(&out))
+}
+
+/// 名前を覚えて、偽のモジュールのハンドルを返す（GetProcAddress で名前に戻す）
+fn fake_module(e: &mut Emu, name: &str) -> u64 {
+    let name = name.to_ascii_uppercase();
+    let idx = match e.loaded.iter().position(|n| *n == name) {
+        Some(i) => i,
+        None => {
+            e.loaded.push(name);
+            e.loaded.len() - 1
+        }
+    };
+    0x7000_0000 + idx as u64 * 0x1_0000
+}
+
+/// GetModuleHandle。自分（NULL）なら DLL の番地。Windows の基本の DLL（KERNEL32 など）は偽のハンドル、そのほか（mscoree など）は無いことにする
+fn module_handle(e: &mut Emu, p: u64, name: &str) -> u64 {
+    if p == 0 {
+        return if e.image_base == 0 { 0x1000_0000 } else { e.image_base };
+    }
+    let up = name.to_ascii_uppercase();
+    if ["KERNEL32", "KERNELBASE", "NTDLL", "USER32", "API-MS-WIN"].iter().any(|k| up.contains(k)) { fake_module(e, &up) } else if e.image_base == 0 { 0x1000_0000 } else { 0 }
 }

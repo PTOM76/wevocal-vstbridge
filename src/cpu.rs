@@ -110,8 +110,8 @@ impl Cpu {
         if index != Register::None {
             a = a.wrapping_add(self.get_reg(index)?.wrapping_mul(i.memory_index_scale() as u64));
         }
-        // fs: が付いていれば TEB の基点を足す（32 ビットの Windows の SEH など）
-        if i.segment_prefix() == Register::FS {
+        // fs:（32 ビット）、gs:（64 ビット）が付いていれば TEB の基点を足す（SEH、スタックの範囲など）
+        if matches!(i.segment_prefix(), Register::FS | Register::GS) {
             a = a.wrapping_add(self.fs_base);
         }
         // 32 ビットのコードの実効アドレスは 32 ビットで回り込む（負のオフセットを足したとき 2^32 を超えないように）

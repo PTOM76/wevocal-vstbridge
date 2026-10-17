@@ -77,6 +77,32 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 cpu.write_op(mem, i, 0, r)?;
             }
         }
+        M::Bsf | M::Bsr => {
+            // 立っている一番下（bsf）、一番上（bsr）のビットの位置。0 なら ZF を立て、行き先は変えない
+            let size = dst_size(i);
+            let (v, _) = cpu.read_op(mem, i, 1)?;
+            let v = v & mask(size);
+            cpu.flags.zf = v == 0;
+            if v != 0 {
+                let n = if m == M::Bsf { v.trailing_zeros() } else { 63 - v.leading_zeros() };
+                cpu.write_op(mem, i, 0, n as u64)?;
+            }
+        }
+        M::Bt | M::Bts | M::Btr | M::Btc => {
+            // ビットを調べて CF に入れる（bts、btr、btc は、そのビットを立てる、消す、反転する）。番号は大きさで回り込む
+            let size = dst_size(i);
+            let (a, _) = cpu.read_op(mem, i, 0)?;
+            let (b, _) = cpu.read_op(mem, i, 1)?;
+            let bit = 1u64 << (b % (size as u64 * 8));
+            cpu.flags.cf = a & bit != 0;
+            let r = match m {
+                M::Bts => a | bit,
+                M::Btr => a & !bit,
+                M::Btc => a ^ bit,
+                _ => return Ok(true),
+            };
+            cpu.write_op(mem, i, 0, r)?;
+        }
         M::Inc | M::Dec => {
             let size = dst_size(i);
             let (a, _) = cpu.read_op(mem, i, 0)?;
@@ -222,6 +248,10 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             cpu.set_reg(iced_x86::Register::AH, ah)?;
         }
         M::Cdqe => cpu.regs[0] = sext(cpu.regs[0], 4),
+        // ax → eax（上位 32 ビットは 0）、al → ax（上位はそのまま）
+        M::Cwde => cpu.regs[0] = sext(cpu.regs[0], 2) & 0xffff_ffff,
+        M::Cbw => cpu.regs[0] = (cpu.regs[0] & !0xffff) | (sext(cpu.regs[0], 1) & 0xffff),
+        M::Cwd => cpu.regs[2] = (cpu.regs[2] & !0xffff) | if sign(cpu.regs[0], 2) { 0xffff } else { 0 },
         M::Cdq => cpu.regs[2] = if sign(cpu.regs[0], 4) { 0xffff_ffff } else { 0 },
         M::Cqo => cpu.regs[2] = if sign(cpu.regs[0], 8) { u64::MAX } else { 0 },
         M::Xchg => {
@@ -229,6 +259,30 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             let (b, _) = cpu.read_op(mem, i, 1)?;
             cpu.write_op(mem, i, 0, b)?;
             cpu.write_op(mem, i, 1, a)?;
+        }
+        // スレッドは 1 つなので lock は無視してよい
+        M::Xadd => {
+            let size = dst_size(i);
+            let (a, _) = cpu.read_op(mem, i, 0)?;
+            let (b, _) = cpu.read_op(mem, i, 1)?;
+            let r = add_sub(cpu, a, b, size, false, 0);
+            cpu.write_op(mem, i, 1, a)?;
+            cpu.write_op(mem, i, 0, r)?;
+        }
+        M::Cmpxchg => {
+            // 引数 0 と rax を比べ、同じなら引数 1 を書き、違えば rax に読む
+            let size = dst_size(i);
+            let (a, _) = cpu.read_op(mem, i, 0)?;
+            let (b, _) = cpu.read_op(mem, i, 1)?;
+            let acc = cpu.regs[0] & mask(size);
+            add_sub(cpu, acc, a, size, true, 0);
+            if acc == a & mask(size) {
+                cpu.write_op(mem, i, 0, b)?;
+            } else if size == 4 {
+                cpu.regs[0] = a & mask(4);
+            } else {
+                cpu.regs[0] = (cpu.regs[0] & !mask(size)) | (a & mask(size));
+            }
         }
         M::Push => {
             let (v, _) = cpu.read_op(mem, i, 0)?;

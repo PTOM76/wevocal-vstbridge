@@ -43,6 +43,9 @@ impl Vst {
     pub fn load(dll: &[u8]) -> R<Vst> {
         let mut emu = Emu::new();
         let img = pe::load(&mut emu.mem, dll)?;
+        emu.image_base = img.base;
+        emu.gui.base = img.base;
+        pe::patch_imports(&mut emu, dll, img.base, crate::host_stubs::resolve, crate::host_stubs::unknown)?;
         let entry = img.export("VSTPluginMain").or_else(|| img.export("main")).ok_or_else(|| Fault("VSTPluginMain が無い".into()))?;
 
         // ホストへの呼び出し（audioMasterCallback）。opcode は rdx（第 2 引数）。audioMasterVersion(1) には 2400 を返す
@@ -51,6 +54,10 @@ impl Vst {
             Ok(if opcode == 1 { 2400 } else { 0 })
         }));
 
+        // TLS の領域を作り、コールバックを DllMain と同じ引数で呼ぶ
+        for cb in pe::setup_tls(&mut emu, dll, img.base)? {
+            emu.call(cb, &[Arg::Int(img.base), Arg::Int(1), Arg::Int(0)])?;
+        }
         // DLL の入口（DllMainCRTStartup）を先に呼ぶ（静的な初期化のため。無くても動くものもある）
         if img.entry != img.base {
             emu.call(img.entry, &[Arg::Int(img.base), Arg::Int(1), Arg::Int(0)])?;

@@ -45,7 +45,7 @@ pub struct Emu {
     pub cpu: Cpu,
     pub mem: Memory,
     /// 命令を読む幅（32 または 64）
-    bits: u32,
+    pub(crate) bits: u32,
     /// 入口の番地 → ホストの関数と、stdcall のとき呼ばれた側が片付ける引数のバイト数（cdecl なら 0）
     thunks: HashMap<u64, (std::rc::Rc<dyn Fn(&mut Emu) -> R<u64>>, u64)>,
     next_thunk: u64,
@@ -55,6 +55,8 @@ pub struct Emu {
     pub procs: HashMap<(String, String), u64>,
     /// ホストのヒープで確保したブロックの大きさ（番地 → バイト数）。HeapReAlloc で中身を写すために覚える
     pub heap_sizes: HashMap<u64, usize>,
+    /// 読み込んだ DLL の番地（GetModuleHandle(NULL) などで返す。0 なら 32 ビットの既定）
+    pub image_base: u64,
     /// x87 で最初に NaN になる命令を見張る（環境変数 VSTBRIDGE_NAN があるときだけ）
     nan_watch: bool,
     /// この呼び出しが始まったときの命令数（無限ループの見張りは、呼び出しごとに数える）
@@ -101,8 +103,17 @@ impl Emu {
             let _ = mem.write_n(teb + 8, 4, top - STACK_SIZE as u64);
             let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
             cpu.fs_base = teb;
+        } else {
+            // 64 ビットの TEB の最小限（gs: で読む）。gs:[8]=スタックの上限、gs:[0x10]=下限（__chkstk が見る）、gs:[0x30]=自分自身、gs:[0x60]=PEB（中身は 0）
+            let teb = 0x7FFD_0000u64;
+            mem.map(teb, 0x2000);
+            let _ = mem.write_n(teb + 8, 8, top);
+            let _ = mem.write_n(teb + 0x10, 8, top - STACK_SIZE as u64);
+            let _ = mem.write_n(teb + 0x30, 8, teb);
+            let _ = mem.write_n(teb + 0x60, 8, teb + 0x1000);
+            cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -276,16 +287,36 @@ impl Emu {
             if self.x87(insn)? {
                 return Ok(());
             }
-            if exec::exec(&mut self.cpu, &mut self.mem, insn)? || sse::exec(&mut self.cpu, &mut self.mem, insn)? {
+            if exec::exec(&mut self.cpu, &mut self.mem, insn)? || sse::exec(&mut self.cpu, &mut self.mem, insn)? || crate::sse2::exec(&mut self.cpu, &mut self.mem, insn)? {
                 return Ok(());
             }
-        } else if exec::exec(&mut self.cpu, &mut self.mem, insn)? || sse::exec(&mut self.cpu, &mut self.mem, insn)? {
+        } else if exec::exec(&mut self.cpu, &mut self.mem, insn)? || sse::exec(&mut self.cpu, &mut self.mem, insn)? || crate::sse2::exec(&mut self.cpu, &mut self.mem, insn)? {
             return Ok(());
         } else if self.x87(insn)? {
             // 範囲の外の x87 の命令（wait など）
             return Ok(());
         }
+        if insn.mnemonic() == iced_x86::Mnemonic::Cpuid {
+            self.cpuid();
+            return Ok(());
+        }
         Err(Fault(format!("unimplemented {insn} @ {:#x}", insn.ip())))
+    }
+
+    /// cpuid。エミュレーターが実行できるもの（x87、CMOV、CX8、SSE、SSE2）だけを名乗る。AVX などは無いと答え、プラグインに使わせない
+    fn cpuid(&mut self) {
+        let leaf = self.cpu.regs[0] as u32;
+        let (a, b, c, d): (u32, u32, u32, u32) = match leaf {
+            // 最大の番号と "GenuineIntel"
+            0 => (1, 0x756e_6547, 0x6c65_746e, 0x4965_6e69),
+            // family 6。edx: FPU(0)、TSC(4)、CX8(8)、CMOV(15)、MMX(23)、FXSR(24)、SSE(25)、SSE2(26)
+            1 => (0x0000_06f1, 0, 0, (1 << 0) | (1 << 4) | (1 << 8) | (1 << 15) | (1 << 23) | (1 << 24) | (1 << 25) | (1 << 26)),
+            _ => (0, 0, 0, 0),
+        };
+        self.cpu.regs[0] = a as u64;
+        self.cpu.regs[3] = b as u64;
+        self.cpu.regs[1] = c as u64;
+        self.cpu.regs[2] = d as u64;
     }
 
     /// x87 の命令を実行する。環境変数 VSTBRIDGE_NAN があれば、最初に NaN か inf になった命令を報告する
