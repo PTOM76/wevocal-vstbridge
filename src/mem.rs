@@ -17,6 +17,17 @@ struct Region {
 
 /// 命令として読まれたかを覚える単位（バイト）。データの書き込みがコードの近くに当たらなければ、デコード済みの命令を捨てずに済む
 const BLOCK: usize = 64;
+/// ページの中の off から len バイトが触れる 64 バイトのブロックのビット
+fn block_mask(off: usize, len: usize) -> u64 {
+    let a = off / BLOCK;
+    let b = (off + len.max(1) - 1) / BLOCK;
+    let hi = if b >= 63 { u64::MAX } else { (1u64 << (b + 1)) - 1 };
+    hi & !((1u64 << a) - 1)
+}
+const PAGE_BITS: u32 = 12;
+const PAGE: usize = 1 << PAGE_BITS;
+/// 32 ビットの番地空間のページ数
+const PAGES: usize = 1 << (32 - PAGE_BITS);
 
 #[derive(Default)]
 pub struct Memory {
@@ -30,6 +41,12 @@ pub struct Memory {
     last_code: std::cell::Cell<usize>,
     /// 領域の添字を start の小さい順に並べたもの（領域が多いとき、二分探索で見つける）
     order: Vec<usize>,
+    /// 4KB ページごとの、ホスト上の先頭の番地（0 なら未割り当て。番地が 2^32 未満で、ページ全体が 1 つの領域に収まるところだけ。読み書きの近道）
+    pages: Vec<usize>,
+    /// ページごとの、命令として読まれた 64 バイトのブロック（1 ビット 1 ブロック。近道の書き込みで、デコード済みの命令を捨てる合図に使う）
+    code_pages: Vec<std::cell::Cell<u64>>,
+    /// VSTBRIDGE_OOB のとき、要求サイズを見張る領域は近道に入れない
+    watch_oob: bool,
     /// 命令として読まれた領域へ書き込みがあった（デコード済みの命令を捨てる合図。Emu が読んで戻す）
     pub code_dirty: bool,
 }
@@ -41,7 +58,7 @@ pub const HEAP_BASE_32: u64 = 0x6000_0000;
 
 impl Memory {
     pub fn new() -> Self {
-        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32, last_data: Default::default(), last_code: Default::default(), order: Vec::new(), code_dirty: false }
+        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32, last_data: Default::default(), last_code: Default::default(), order: Vec::new(), pages: vec![0; PAGES], code_pages: vec![Default::default(); PAGES], watch_oob: std::env::var("VSTBRIDGE_OOB").is_ok(), code_dirty: false }
     }
 
     /// start から size バイトを 0 で割り当てる
@@ -50,6 +67,27 @@ impl Memory {
         self.regions.push(Region { start, data: vec![0; size], limit: 0, executed: Default::default() });
         let at = self.order.partition_point(|&k| self.regions[k].start < start);
         self.order.insert(at, idx);
+        self.map_pages(idx);
+    }
+
+    /// ページ全体が領域に収まる 4KB ごとに、ホストの番地を表へ書く（重なるときは先に割り当てた領域を優先する）
+    fn map_pages(&mut self, idx: usize) {
+        let r = &self.regions[idx];
+        if self.watch_oob && r.limit > 0 {
+            return;
+        }
+        let end = r.start + r.data.len() as u64;
+        if r.start >= 1 << 32 {
+            return;
+        }
+        let first = (r.start + PAGE as u64 - 1) >> PAGE_BITS;
+        let last = end.min(1 << 32) >> PAGE_BITS;
+        for pg in first..last {
+            let slot = &mut self.pages[pg as usize];
+            if *slot == 0 {
+                *slot = r.data.as_ptr() as usize + ((pg << PAGE_BITS) - r.start) as usize;
+            }
+        }
     }
 
     /// ホストの領域から size バイトを 16 バイト境界で確保し、その番地を返す
@@ -63,9 +101,14 @@ impl Memory {
 
     /// 32 ビットのプラグインに渡せる番地（2^32 未満）で確保する
     pub fn alloc32(&mut self, size: usize) -> u32 {
-        let at = self.heap_next32;
         let want = size;
-        let size = (size + 15) & !15;
+        // 大きいブロックはページに合わせる（読み書きの近道が使える）
+        let big = size >= 2 * PAGE;
+        if big {
+            self.heap_next32 = (self.heap_next32 + PAGE as u64 - 1) & !(PAGE as u64 - 1);
+        }
+        let at = self.heap_next32;
+        let size = if big { (size + PAGE - 1) & !(PAGE - 1) } else { (size + 15) & !15 };
         self.map(at, size.max(16));
         // 要求サイズを覚える（範囲外の書き込みを見つけるため）
         if let Some(r) = self.regions.last_mut() {
@@ -120,12 +163,34 @@ impl Memory {
     }
 
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> R<()> {
+        let off = (addr & (PAGE as u64 - 1)) as usize;
+        if addr >> 32 == 0 && off + buf.len() <= PAGE {
+            let p = self.pages[(addr >> PAGE_BITS) as usize];
+            if p != 0 {
+                // SAFETY: p は領域のデータ（Vec は動かない）の中のページの先頭で、off + len はページに収まる
+                unsafe { std::ptr::copy_nonoverlapping((p + off) as *const u8, buf.as_mut_ptr(), buf.len()) };
+                return Ok(());
+            }
+        }
         let (i, o) = self.find(addr, buf.len())?;
         buf.copy_from_slice(&self.regions[i].data[o..o + buf.len()]);
         Ok(())
     }
 
     pub fn write(&mut self, addr: u64, buf: &[u8]) -> R<()> {
+        let off = (addr & (PAGE as u64 - 1)) as usize;
+        if addr >> 32 == 0 && off + buf.len() <= PAGE {
+            let pg = (addr >> PAGE_BITS) as usize;
+            let p = self.pages[pg];
+            if p != 0 {
+                if self.code_pages[pg].get() & block_mask(off, buf.len()) != 0 {
+                    self.code_dirty = true;
+                }
+                // SAFETY: read と同じ
+                unsafe { std::ptr::copy_nonoverlapping(buf.as_ptr(), (p + off) as *mut u8, buf.len()) };
+                return Ok(());
+            }
+        }
         let (i, o) = self.find(addr, buf.len())?;
         // 確保したブロックの要求サイズを超えた書き込みを報告する（VSTBRIDGE_OOB=1。調査用）
         {
@@ -147,6 +212,16 @@ impl Memory {
 
     /// 命令を読むための、addr から読めるだけ（最大 len）の写し
     pub fn fetch(&self, addr: u64, len: usize) -> R<&[u8]> {
+        if addr >> 32 == 0 {
+            let first = (addr >> PAGE_BITS) as usize;
+            let off = (addr & (PAGE as u64 - 1)) as usize;
+            let c = &self.code_pages[first];
+            c.set(c.get() | block_mask(off, len.min(PAGE - off)));
+            if off + len > PAGE && first + 1 < PAGES {
+                let c = &self.code_pages[first + 1];
+                c.set(c.get() | block_mask(0, off + len - PAGE));
+            }
+        }
         fn slice(r: &Region, addr: u64, len: usize) -> &[u8] {
             let o = (addr - r.start) as usize;
             let mut ex = r.executed.borrow_mut();

@@ -61,7 +61,7 @@ pub struct Emu {
     /// デコード済みの命令（番地 → 命令）。コードが書き換わる（自己展開が終わったあと）ことはないとみなす。展開が終わってから使うため、書き込みで無効にする
     decoded: HashMap<u64, Instruction, FastHash>,
     /// 命令ごとの回数と時間（VSTBRIDGE_PROF=1。調査用）
-    pub prof: Option<HashMap<String, (u64, u128)>>,
+    pub prof: Option<HashMap<u32, (u64, u64)>>,
 }
 
 impl Emu {
@@ -206,11 +206,12 @@ impl Emu {
         }
         self.cpu.rip = insn.next_ip();
         if self.prof.is_some() {
-            let t = std::time::Instant::now();
+            let t = unsafe { core::arch::x86_64::_rdtsc() };
             let r = self.run_insn(&insn);
-            let e = self.prof.as_mut().unwrap().entry(format!("{:?}", insn.mnemonic())).or_insert((0, 0));
+            let d = unsafe { core::arch::x86_64::_rdtsc() } - t;
+            let e = self.prof.as_mut().unwrap().entry(insn.mnemonic() as u32).or_insert((0, 0));
             e.0 += 1;
-            e.1 += t.elapsed().as_nanos();
+            e.1 += d;
             return r.map_err(|e| Fault(format!("{} (at {rip:#x}: {insn})", e.0)));
         }
         self.run_insn(&insn).map_err(|e| Fault(format!("{} (at {rip:#x}: {insn})", e.0)))
