@@ -11,7 +11,8 @@ use std::collections::HashMap;
 pub const RETURN_MAGIC: u64 = 0x4FFF_FFF0;
 /// ホストの関数の入口の番地の始まり（32 ビットの DLL でも IAT（4 バイト）に書けるよう、2^32 未満にする）
 pub const THUNK_BASE: u64 = 0x5000_0000;
-const STACK_TOP: u64 = 0x7FFF_0010_0000;
+/// 64 ビットでも 4GB 未満に置く（ページ表の近道と JIT のため）
+const STACK_TOP: u64 = 0x7FFE_0000;
 /// 32 ビットの DLL 用のスタック（2^32 未満の番地。ESP が 32 ビットなので、ここでないと番地が入らない）
 const STACK_TOP_32: u64 = 0x7FFE_0000;
 const STACK_SIZE: usize = 1 << 20;

@@ -95,12 +95,9 @@ impl Memory {
     }
 
     /// ホストの領域から size バイトを 16 バイト境界で確保し、その番地を返す
+    /// （4GB 未満に置く。ページ表の近道と JIT のため）
     pub fn alloc(&mut self, size: usize) -> u64 {
-        let at = self.heap_next;
-        let size = (size + 15) & !15;
-        self.map(at, size.max(16));
-        self.heap_next += size.max(16) as u64 + 16;
-        at
+        self.alloc32(size) as u64
     }
 
     /// 32 ビットのプラグインに渡せる番地（2^32 未満）で確保する

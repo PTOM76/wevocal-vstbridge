@@ -23,11 +23,15 @@ fn err<E: std::fmt::Display>(e: E) -> Fault {
     Fault(format!("pe: {e}"))
 }
 
-/// DLL を希望の番地（ImageBase）に置く（メモリは自由に割り当てられるので、置き直しの補正は要らない）
+/// 4GB を超える番地を望む DLL の置き先。ゲストのメモリを 4GB 未満にそろえ、ページ表の近道（mem.rs）と JIT が使えるようにする
+const LOW_BASE: u64 = 0x1000_0000;
+
+/// DLL を置く。希望の番地（ImageBase）が 4GB を超えるときは LOW_BASE に置き、再配置の表で番地を直す
 pub fn load(mem: &mut Memory, data: &[u8]) -> R<Image> {
     let file = PeFile64::parse(data).map_err(err)?;
     let opt = file.nt_headers().optional_header();
-    let base = opt.image_base();
+    let want = opt.image_base();
+    let base = if want + opt.size_of_image() as u64 > 1 << 32 { LOW_BASE } else { want };
     let size = opt.size_of_image() as u64;
     let headers = opt.size_of_headers() as usize;
     mem.map(base, size as usize);
@@ -40,11 +44,14 @@ pub fn load(mem: &mut Memory, data: &[u8]) -> R<Image> {
             mem.write(base + va, &data[raw..raw + len])?;
         }
     }
+    if base != want {
+        relocate(mem, &file, base, base.wrapping_sub(want))?;
+    }
     let exports = file
         .exports()
         .map_err(err)?
         .iter()
-        .map(|e| (String::from_utf8_lossy(e.name()).into_owned(), e.address()))
+        .map(|e| (String::from_utf8_lossy(e.name()).into_owned(), e.address() - want + base))
         .collect();
     let imports = file
         .imports()
@@ -138,4 +145,39 @@ pub fn setup_tls(emu: &mut crate::emu::Emu, data: &[u8], base: u64) -> R<Vec<u64
         }
     }
     Ok(list)
+}
+
+/// 再配置の表（data directory の 5 番）をたどり、絶対番地に delta を足す。種類は 10（64 ビット）と 3（32 ビット）だけ使われる
+fn relocate(mem: &mut Memory, file: &PeFile64, base: u64, delta: u64) -> R<()> {
+    let Some(dir) = file.data_directories().get(5) else { return Err(Fault("再配置の表が無い（4GB を超える番地にしか置けない）".into())) };
+    let (rva, size) = (dir.virtual_address.get(LE) as u64, dir.size.get(LE) as u64);
+    if rva == 0 {
+        return Err(Fault("再配置の表が無い（4GB を超える番地にしか置けない）".into()));
+    }
+    let mut at = base + rva;
+    let end = at + size;
+    while at + 8 <= end {
+        let page = mem.read_n(at, 4)?;
+        let len = mem.read_n(at + 4, 4)?;
+        if len < 8 {
+            break;
+        }
+        for k in 0..(len - 8) / 2 {
+            let e = mem.read_n(at + 8 + k * 2, 2)?;
+            let p = base + page + (e & 0xfff);
+            match e >> 12 {
+                10 => {
+                    let v = mem.read_n(p, 8)?;
+                    mem.write_n(p, 8, v.wrapping_add(delta))?;
+                }
+                3 => {
+                    let v = mem.read_n(p, 4)?;
+                    mem.write_n(p, 4, v.wrapping_add(delta) & 0xffff_ffff)?;
+                }
+                _ => {}
+            }
+        }
+        at += len;
+    }
+    Ok(())
 }
