@@ -24,5 +24,14 @@ fn main() {
     let run = t1.elapsed();
     let steps = v.emu.cpu.steps - load_steps;
     println!("読み込み {:.2} 秒（{} 命令）", load.as_secs_f64(), load_steps);
+    if let Some(p) = &v.emu.prof {
+        let mut rows: Vec<_> = p.iter().collect();
+        rows.sort_by_key(|(_, (_, t))| std::cmp::Reverse(*t));
+        for (m, (c, t)) in rows.iter().take(25) {
+            println!("{m:<12} {c:>10} 回 {:>8.1} ms {:>6.0} ns/回", *t as f64 / 1e6, *t as f64 / *c as f64);
+        }
+    }
     println!("{secs} 秒分の処理: {:.3} 秒（実時間の {:.2} 倍）、{} 命令、1 秒あたり {:.1} M 命令", run.as_secs_f64(), run.as_secs_f64() / secs, steps, steps as f64 / run.as_secs_f64() / 1e6);
 }
+
+// 命令ごとの内訳（VSTBRIDGE_PROF=1）

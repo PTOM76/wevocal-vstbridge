@@ -15,6 +15,24 @@ const STACK_TOP: u64 = 0x7FFF_0010_0000;
 const STACK_TOP_32: u64 = 0x7FFE_0000;
 const STACK_SIZE: usize = 1 << 20;
 /// 1 回の呼び出しで実行する命令の上限（無限ループの見張り）
+/// 番地を引くだけの速いハッシュ（標準の SipHash は命令 1 つあたりには重い）
+#[derive(Default, Clone, Copy)]
+pub struct FastHasher(u64);
+impl std::hash::Hasher for FastHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ *b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (v ^ (v >> 15)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+pub type FastHash = std::hash::BuildHasherDefault<FastHasher>;
+
 const MAX_STEPS: u64 = 50_000_000;
 
 /// ホストの関数。引数はレジスタとスタックから自分で読み、戻り値（rax に入れる）を返す
@@ -41,7 +59,9 @@ pub struct Emu {
     /// 全命令とレジスタを出す（環境変数 VSTBRIDGE_TRACE。毎命令は読まないよう、作るときに 1 度だけ読む）
     trace: bool,
     /// デコード済みの命令（番地 → 命令）。コードが書き換わる（自己展開が終わったあと）ことはないとみなす。展開が終わってから使うため、書き込みで無効にする
-    decoded: HashMap<u64, Instruction>,
+    decoded: HashMap<u64, Instruction, FastHash>,
+    /// 命令ごとの回数と時間（VSTBRIDGE_PROF=1。調査用）
+    pub prof: Option<HashMap<String, (u64, u128)>>,
 }
 
 impl Emu {
@@ -72,7 +92,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::new() }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -185,6 +205,14 @@ impl Emu {
             );
         }
         self.cpu.rip = insn.next_ip();
+        if self.prof.is_some() {
+            let t = std::time::Instant::now();
+            let r = self.run_insn(&insn);
+            let e = self.prof.as_mut().unwrap().entry(format!("{:?}", insn.mnemonic())).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += t.elapsed().as_nanos();
+            return r.map_err(|e| Fault(format!("{} (at {rip:#x}: {insn})", e.0)));
+        }
         self.run_insn(&insn).map_err(|e| Fault(format!("{} (at {rip:#x}: {insn})", e.0)))
     }
 
