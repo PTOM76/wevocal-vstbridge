@@ -226,6 +226,11 @@ impl Memory {
         Ok(())
     }
 
+    /// ページ表（4KB ごとのホストの番地）の先頭。JIT が生成コードに埋める（割り当て直さないので寿命の間は変わらない）
+    pub fn pages_ptr(&self) -> u32 {
+        self.pages.as_ptr() as usize as u32
+    }
+
     /// 命令を読むための、addr から読めるだけ（最大 len）の写し
     pub fn fetch(&self, addr: u64, len: usize) -> R<&[u8]> {
         if addr >> 32 == 0 {

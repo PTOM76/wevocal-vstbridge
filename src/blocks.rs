@@ -123,6 +123,27 @@ impl Emu {
                 self.mem.code_dirty = false;
                 self.blocks.clear();
                 self.decoded_clear();
+                self.jit.clear();
+            }
+            // JIT: 何度も通ったブロックは wasm に変換して直接呼ぶ（wasm の中だけ）
+            #[cfg(target_arch = "wasm32")]
+            if self.jit.on {
+                let bits = self.bits();
+                if let Some(f) = self.jit.get(&self.mem, bits, rip, 256) {
+                    let cpu_ptr = (&mut self.cpu as *mut crate::cpu::Cpu) as usize as u32;
+                    let n = f(cpu_ptr);
+                    self.cpu.steps += n as u64;
+                    if self.cpu.jit_bail != 0 {
+                        // メモリの遅い道。その 1 命令だけインタープリターで進める
+                        self.cpu.jit_bail = 0;
+                        self.step()?;
+                        self.cpu.steps += 1;
+                    }
+                    if self.cpu.steps - self.call_start > self.max_steps {
+                        return Err(Fault(format!("step limit (rip={:#x})", self.cpu.rip)));
+                    }
+                    continue;
+                }
             }
             let (start, len) = self.block_at(rip)?;
             let first = start as usize;

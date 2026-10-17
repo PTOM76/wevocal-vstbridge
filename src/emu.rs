@@ -75,6 +75,7 @@ pub struct Emu {
     /// 前もって解いた形（fast.rs）を使うか（トレースや調査のときは使わない）
     use_fast: bool,
     pub(crate) blocks: crate::blocks::Blocks,
+    pub jit: crate::jit::Jit,
     /// エディター（画面）の状態。ウィンドウ、GDI のオブジェクト、入力（gui.rs）
     pub gui: crate::gui::Gui,
     /// 命令ごとの回数と時間（VSTBRIDGE_PROF=1。調査用）
@@ -118,7 +119,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x60, 8, teb + 0x1000);
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -211,7 +212,7 @@ impl Emu {
 
     /// rip から命令を実行する。戻りの印に来たら止める。ホストの入口に飛んだらその関数を呼ぶ
     fn run(&mut self) -> R<()> {
-        if self.use_fast && self.bits == 32 {
+        if self.use_fast {
             return self.run_blocks();
         }
         self.call_start = self.cpu.steps;
@@ -237,7 +238,7 @@ impl Emu {
     }
 
     /// 命令を 1 つ読んで実行する。rip は命令の長さだけ進める（分岐の命令は中で rip を変える）
-    fn step(&mut self) -> R<()> {
+    pub(crate) fn step(&mut self) -> R<()> {
         let rip = self.cpu.rip;
         // 読み取った命令を番地ごとに覚えておく（同じ処理を何度も回すので、デコードは 1 回で済む）
         // コードの領域に書き込みがあったら（自己展開、コードの書き換え）、覚えた命令を全部捨てる

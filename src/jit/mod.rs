@@ -1,4 +1,5 @@
 //! JIT。よく通る x86 のブロックを wasm の関数に変換して動かす（設計は memo/jit.md）。変換は gen.rs、読み込みは install.rs（wasm の中だけ）
+pub mod codegen;
 #[cfg(target_arch = "wasm32")]
 pub mod install;
 
@@ -37,4 +38,58 @@ pub fn selftest(x: u32) -> Result<u32, String> {
     let bytes = module(&[], &[W::LocalGet(0), W::I32Const(42), W::I32Add]);
     let f = install::install(&bytes)?;
     Ok(f(x))
+}
+
+/// 変換したブロックを覚えて動かす（wasm の中だけ）。ネイティブでは実行できないので、いつも覚えないまま（インタープリター）
+pub struct Jit {
+    /// ブロックの番地 → 変換した関数（None は「変換できない」と分かったもの）
+    #[cfg(target_arch = "wasm32")]
+    funcs: std::collections::HashMap<u64, Option<install::JitFn>, crate::emu::FastHash>,
+    /// 番地ごとの実行回数（この回数を超えたら変換する）
+    hits: std::collections::HashMap<u64, u32, crate::emu::FastHash>,
+    /// 変換を始める回数
+    threshold: u32,
+    pub on: bool,
+}
+
+impl Default for Jit {
+    fn default() -> Self {
+        let threshold = std::env::var("VSTBRIDGE_JIT_THRESHOLD").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+        Jit {
+            #[cfg(target_arch = "wasm32")]
+            funcs: Default::default(),
+            hits: Default::default(),
+            threshold,
+            on: std::env::var("VSTBRIDGE_NOJIT").is_err(),
+        }
+    }
+}
+
+impl Jit {
+    pub fn clear(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.funcs.clear();
+        self.hits.clear();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Jit {
+    /// rip のブロックの変換済み関数。まだなら、回数を数え、十分なら変換する
+    pub fn get(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize) -> Option<install::JitFn> {
+        if let Some(f) = self.funcs.get(&rip) {
+            return *f;
+        }
+        let h = self.hits.entry(rip).or_insert(0);
+        *h += 1;
+        if *h < self.threshold {
+            return None;
+        }
+        let f = codegen::compile_block(mem, bits, rip, 256).and_then(|c| {
+            let bytes = module(&c.locals, &c.body);
+            install::install(&bytes).ok()
+        });
+        self.funcs.insert(rip, f);
+        f
+    }
 }
