@@ -66,9 +66,8 @@ fn wet_path_runs() {
 }
 
 /// 長く流して、最初の NaN がどこで出るか探す（VSTBRIDGE_NAN=1 で、NaN か inf になった x87 の命令が出る）。
-/// 既知の問題: ブロック 50 あたりでリバーブの内部が発散して NaN になる（調査中。HANDOFF.md 参照）ので、通常は飛ばす
+/// （fxch の誤りを直す前は、ブロック 50 あたりでリバーブの内部が発散して NaN になっていた）
 #[test]
-#[ignore]
 fn long_run_no_nan() {
     let Ok(path) = std::env::var("SOLIDVERB_DLL") else { return; };
     let data = std::fs::read(&path).expect("read dll");
@@ -139,4 +138,59 @@ fn try_tail() {
     let total: f32 = energy.iter().sum();
     println!("ブロックごとのエネルギー（先頭 12）: {:?}", energy.iter().take(12).map(|e| (e * 1000.0).round() / 1000.0).collect::<Vec<_>>());
     println!("合計 {total:.4}、尾（ブロック 4 以降）= {:.4}", energy.iter().skip(4).sum::<f32>());
+}
+
+/// ネイティブ（testplug/native32）と同じ条件で動かし、同じ形式で出力する（比べるため）。つまみは既定値のまま、200 ブロック
+/// 例: VST32_DLL="…/SH-1 Delay.dll" cargo test --test solidverb compare_native -- --ignored --nocapture
+#[test]
+#[ignore]
+fn compare_native() {
+    let Ok(path) = std::env::var("VST32_DLL") else { return; };
+    let data = std::fs::read(&path).expect("read dll");
+    let mut v = Vst32::load(&data).expect("load");
+    let n = 128;
+    let mut energies = Vec::new();
+    for b in 0..200 {
+        let mut imp = vec![0f32; n];
+        if b == 0 {
+            imp[0] = 1.0;
+        }
+        let out = v.process(&[imp.clone(), imp], n).unwrap();
+        if let Some(k) = out[0].iter().position(|x| !x.is_finite()) {
+            println!("ブロック {b} の {k} サンプル目で NaN");
+            break;
+        }
+        energies.push(out[0].iter().map(|x| x.abs()).sum::<f32>());
+    }
+    let r = |x: f32| (x * 1000.0).round() / 1000.0;
+    println!("ブロックごとのエネルギー（先頭 12）: {:?}", energies.iter().take(12).map(|x| r(*x)).collect::<Vec<_>>());
+    println!("合計 {:.4}、尾（ブロック 4 以降）= {:.4}、最後のブロック {:.4}", energies.iter().sum::<f32>(), energies.iter().skip(4).sum::<f32>(), energies.last().copied().unwrap_or(0.0));
+}
+
+/// 本物の CPU（testplug/native32 で、同じ DLL を 32 ビットのホストで動かしたもの）の出力と、エミュレーターの出力が一致するか。
+/// 環境変数 SH1_REVERB_DLL に SH-1 Reverb.dll のパスを渡したときだけ実行する（市販ではないが再配布は不可なので、リポジトリには含めない）
+#[test]
+fn matches_native_reverb() {
+    let Ok(path) = std::env::var("SH1_REVERB_DLL") else { return; };
+    let data = std::fs::read(&path).expect("read dll");
+    let mut v = Vst32::load(&data).expect("load");
+    let n = 128;
+    let mut energies = Vec::new();
+    for b in 0..200 {
+        let mut imp = vec![0f32; n];
+        if b == 0 {
+            imp[0] = 1.0;
+        }
+        let out = v.process(&[imp.clone(), imp], n).unwrap();
+        assert!(out[0].iter().all(|x| x.is_finite()), "ブロック {b} で NaN");
+        energies.push(out[0].iter().map(|x| x.abs()).sum::<f32>());
+    }
+    // 本物の CPU での値（小数 3 桁）。ブロック 0 はドライ、ブロック 9 から反射が始まる
+    let want = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.14, 0.118, 0.129];
+    for (i, w) in want.iter().enumerate() {
+        assert!((energies[i] - w).abs() < 0.002, "ブロック {i}: エミュレーター {} 本物 {w}", energies[i]);
+    }
+    let total: f32 = energies.iter().sum();
+    assert!((total - 17.1494).abs() < 0.01, "合計 {total}");
+    assert!((energies.last().unwrap() - 0.0422).abs() < 0.002, "最後のブロック {}", energies.last().unwrap());
 }

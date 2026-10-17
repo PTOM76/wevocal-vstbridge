@@ -239,7 +239,17 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
             e.heap_sizes.insert(at as u64, size);
             Ok(at as u64)
         })),
-        ("KERNEL32.DLL", "HeapFree") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(1) })),
+        ("KERNEL32.DLL", "HeapFree") => Some(Box::new(|e: &mut Emu| -> R<u64> {
+            // HeapFree(hHeap, flags, ptr)。確保していないポインター、二重の解放を報告する（本物の Windows はヒープの破壊として終了する。調査用 VSTBRIDGE_HEAP=1）
+            let ptr = arg(e, 3)?;
+            if ptr != 0 {
+                let known = e.heap_sizes.remove(&ptr).is_some();
+                if !known && std::env::var("VSTBRIDGE_HEAP").is_ok() {
+                    eprintln!("[heap] HeapFree: 確保していない、または解放済みのポインター {ptr:#x}");
+                }
+            }
+            Ok(1)
+        })),
         ("KERNEL32.DLL", "VirtualAlloc") => Some(Box::new(|e: &mut Emu| -> R<u64> {
             // VirtualAlloc(addr, size, ...)
             let size = arg(e, 2)?;

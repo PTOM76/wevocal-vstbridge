@@ -122,3 +122,55 @@ fn mul_cl_byte() {
     let e = with_regs(&[0xF6, 0xE1], &[(0, 200), (1, 3)]);
     assert_eq!(e.cpu.regs[0] & 0xffff, 600);
 }
+
+// ---- 2^x を作る典型の並び（フィルターやリバーブの係数の計算に出る）----
+#[test]
+fn pow2_idiom() {
+    // 機械語: D9 C0 (fld st0) / D9 FC (frndint) / DC E9 (fsub st1,st0) / D9 C9 (fxch) / D9 F0 (f2xm1) / D9 E8 (fld1) / DE C1 (faddp) / D9 FD (fscale) / DD D9 (fstp st1)
+    // st(0)=3.5 を積んで 2^3.5 = 11.3137... を作る
+    let code = [0xD9, 0xC0, 0xD9, 0xFC, 0xDC, 0xE9, 0xD9, 0xC9, 0xD9, 0xF0, 0xD9, 0xE8, 0xDE, 0xC1, 0xD9, 0xFD, 0xDD, 0xD9];
+    let e = with_stack(&code, &[3.5]);
+    let want = 2f64.powf(3.5);
+    assert!((e.cpu.st(0) - want).abs() < 1e-9, "got {} want {}", e.cpu.st(0), want);
+}
+
+#[test]
+fn pow10_via_fyl2x() {
+    // 10^x = 2^(x * log2(10))。x=2 → 100。fldl2t（log2(10)を積む）→ fmul → 上の並び
+    // D9 E9 (fldl2t) / DE C9 (fmulp) / 上の 2^x の並び
+    let mut code = vec![0xD9, 0xE9, 0xDE, 0xC9];
+    code.extend_from_slice(&[0xD9, 0xC0, 0xD9, 0xFC, 0xDC, 0xE9, 0xD9, 0xC9, 0xD9, 0xF0, 0xD9, 0xE8, 0xDE, 0xC1, 0xD9, 0xFD, 0xDD, 0xD9]);
+    let e = with_stack(&code, &[2.0]);
+    assert!((e.cpu.st(0) - 100.0).abs() < 1e-6, "got {}", e.cpu.st(0));
+}
+
+#[test]
+fn frndint_ties_to_even_and_modes() {
+    // frndint の既定は偶数丸め: 2.5 → 2、3.5 → 4
+    assert_eq!(with_stack(&[0xD9, 0xFC], &[2.5]).cpu.st(0), 2.0);
+    assert_eq!(with_stack(&[0xD9, 0xFC], &[3.5]).cpu.st(0), 4.0);
+}
+
+/// 並びの途中経過を 1 命令ずつ表示する（どこでずれるか探す）。cargo test --test x87 step_by_step -- --nocapture --ignored
+#[test]
+#[ignore]
+fn step_by_step() {
+    let steps: [(&str, &[u8]); 9] = [
+        ("fld st0", &[0xD9, 0xC0]),
+        ("frndint", &[0xD9, 0xFC]),
+        ("fsub st(1),st", &[0xDC, 0xE9]),
+        ("fxch", &[0xD9, 0xC9]),
+        ("f2xm1", &[0xD9, 0xF0]),
+        ("fld1", &[0xD9, 0xE8]),
+        ("faddp", &[0xDE, 0xC1]),
+        ("fscale", &[0xD9, 0xFD]),
+        ("fstp st(1)", &[0xDD, 0xD9]),
+    ];
+    let mut code = Vec::new();
+    for (i, (name, bytes)) in steps.iter().enumerate() {
+        code.extend_from_slice(bytes);
+        let e = with_stack(&code, &[3.5]);
+        let st: Vec<String> = (0..3).map(|n| format!("{:.4}", e.cpu.st(n))).collect();
+        println!("{} {:<14} → st(0..2)=[{}] 深さ={}", i + 1, name, st.join(", "), e.cpu.fpu_depth);
+    }
+}

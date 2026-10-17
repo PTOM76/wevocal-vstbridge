@@ -174,7 +174,8 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
         M::Fldlg2 => cpu.fpush(std::f64::consts::LOG10_2),
         M::Fldln2 => cpu.fpush(std::f64::consts::LN_2),
         M::Fxch => {
-            let n = if i.op_count() > 0 { streg(i.op_register(0)).unwrap_or(1) } else { 1 };
+            // iced は fxch を [ST0, ST(i)] の 2 オペランドで表す。交換相手は 2 番目（以前は 1 番目を読んで、st0 と st0 を交換していた = 何も起きなかった）
+            let n = if i.op_count() > 1 { streg(i.op_register(1)).unwrap_or(1) } else if i.op_count() == 1 { streg(i.op_register(0)).unwrap_or(1) } else { 1 };
             let (a, b) = (cpu.st(0), cpu.st(n));
             cpu.set_st(0, b);
             cpu.set_st(n, a);

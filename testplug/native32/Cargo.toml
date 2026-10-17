@@ -1,0 +1,11 @@
+[package]
+name = "native32"
+version = "0.1.0"
+edition = "2021"
+
+# 32 ビットの VST2 を、本物の CPU で動かす小さなホスト（エミュレーターの結果と比べる基準）。ビルド: cargo build --release --target i686-pc-windows-msvc
+
+[dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel"] }
+
+[workspace]

@@ -9,6 +9,8 @@ pub type R<T> = Result<T, Fault>;
 struct Region {
     start: u64,
     data: Vec<u8>,
+    /// ホストが確保した領域で、プラグインが要求したサイズ（これを超える書き込みは範囲外。0 なら見張らない）
+    limit: usize,
 }
 
 #[derive(Default)]
@@ -32,7 +34,7 @@ impl Memory {
 
     /// start から size バイトを 0 で割り当てる
     pub fn map(&mut self, start: u64, size: usize) {
-        self.regions.push(Region { start, data: vec![0; size] });
+        self.regions.push(Region { start, data: vec![0; size], limit: 0 });
     }
 
     /// ホストの領域から size バイトを 16 バイト境界で確保し、その番地を返す
@@ -47,8 +49,13 @@ impl Memory {
     /// 32 ビットのプラグインに渡せる番地（2^32 未満）で確保する
     pub fn alloc32(&mut self, size: usize) -> u32 {
         let at = self.heap_next32;
+        let want = size;
         let size = (size + 15) & !15;
         self.map(at, size.max(16));
+        // 要求サイズを覚える（範囲外の書き込みを見つけるため）
+        if let Some(r) = self.regions.last_mut() {
+            r.limit = want;
+        }
         self.heap_next32 += size.max(16) as u64 + 16;
         at as u32
     }
@@ -70,6 +77,11 @@ impl Memory {
 
     pub fn write(&mut self, addr: u64, buf: &[u8]) -> R<()> {
         let (i, o) = self.find(addr, buf.len())?;
+        // 確保したブロックの要求サイズを超えた書き込みを報告する（VSTBRIDGE_OOB=1。調査用）
+        let lim = self.regions[i].limit;
+        if lim > 0 && o + buf.len() > lim && std::env::var("VSTBRIDGE_OOB").is_ok() {
+            eprintln!("[oob] 確保 {} バイトのブロック {:#x} の外へ書いた: オフセット {} から {} バイト", lim, self.regions[i].start, o, buf.len());
+        }
         self.regions[i].data[o..o + buf.len()].copy_from_slice(buf);
         Ok(())
     }
