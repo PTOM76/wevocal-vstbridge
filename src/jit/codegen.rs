@@ -609,10 +609,29 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
         }
         M::Lea => {
             let Opnd::Mem(mo, _) = operand(i, 1)? else { return None };
+            let (idx, _) = gpr(i.op_register(0))?;
+            let reg64 = |r: Register| r == Register::None || r.size() == 8;
+            if i.op_register(0).size() == 8 && reg64(i.memory_base()) && reg64(i.memory_index()) {
+                // 64 ビットの番地の計算（負や 4GB 以上になりうる。メモリの読み書きと違い、32 ビットに切り詰めない）
+                let disp = if i.memory_base() == Register::RIP { mo.disp as i64 } else { i.memory_displacement64() as i64 };
+                asm.body.push(W::I64Const(disp));
+                if let Some(b) = mo.base {
+                    asm.load_reg(b);
+                    asm.body.push(W::I64Add);
+                }
+                if let Some(ix) = mo.index {
+                    asm.load_reg(ix);
+                    if mo.scale > 1 {
+                        asm.body.extend([W::I64Const(mo.scale as i64), W::I64Mul]);
+                    }
+                    asm.body.push(W::I64Add);
+                }
+                asm.store_reg(idx, 8);
+                return Some(());
+            }
             asm.calc_addr(&mo);
             asm.body.push(W::LocalGet(GA));
             asm.body.push(W::I64ExtendI32U);
-            let (idx, _) = gpr(i.op_register(0))?;
             asm.store_reg(idx, i.op_register(0).size());
             Some(())
         }
