@@ -53,7 +53,7 @@ impl Asm {
         self.body.push(W::LocalTee(A));
         self.body.push(W::I32WrapI64);
         self.body.push(W::LocalSet(GA));
-        self.resolve_ptr(w, insn_addr, count);
+        self.resolve_ptr_w(w, insn_addr, count);
         self.body.push(W::LocalGet(HP));
         self.body.push(W::LocalGet(B));
         self.body.push(store_op(w));

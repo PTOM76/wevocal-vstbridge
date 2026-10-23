@@ -89,6 +89,8 @@ struct Asm {
     body: Vec<W<'static>>,
     off: Off,
     pages_ptr: u32,
+    /// code_pages の先頭（ホストの番地）
+    code_ptr: u32,
     bits: u32,
     /// 今の命令で実際に書くフラグ（使われるもの）だけのビット。CF=1,ZF=2,SF=4,OF=8,PF=16
     flag_mask: u8,
@@ -217,6 +219,24 @@ impl Asm {
         self.body.push(W::I32Const(count as i32));
         self.body.push(W::LocalGet(CNT));
         self.body.push(W::I32Add);
+    }
+    /// 書き込み用の resolve_ptr。命令として読んだ 64 バイトがあるページへの書き込みは中断して、インタープリターに任せる
+    /// （インタープリターの書き込みが code_dirty を立て、デコード済みの命令と JIT の関数を捨てる）
+    fn resolve_ptr_w(&mut self, size: usize, insn_addr: u64, count: u32) {
+        self.resolve_ptr(size, insn_addr, count);
+        self.body.push(W::LocalGet(GA));
+        self.body.push(W::I32Const(12));
+        self.body.push(W::I32ShrU);
+        self.body.push(W::I32Const(3));
+        self.body.push(W::I32Shl);
+        self.body.push(W::I32Const(self.code_ptr as i32));
+        self.body.push(W::I32Add);
+        self.body.push(W::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
+        self.body.push(W::I64Const(0));
+        self.body.push(W::I64Ne);
+        self.body.push(W::If(BlockType::Empty));
+        self.emit_bail(insn_addr, count);
+        self.body.push(W::End);
     }
     /// rip を v にして、count を積んで返す
     fn emit_exit(&mut self, v: u64, count: u32) {
@@ -525,7 +545,7 @@ fn emit_store_dst(asm: &mut Asm, i: &Instruction, size: usize, insn_addr: u64, c
             asm.body.push(W::LocalSet(R));
             let Opnd::Mem(mo, _) = operand(i, 0)? else { return None };
             asm.calc_addr(&mo);
-            asm.resolve_ptr(size, insn_addr, count);
+            asm.resolve_ptr_w(size, insn_addr, count);
             asm.body.push(W::LocalGet(HP));
             asm.body.push(W::LocalGet(R));
             asm.body.push(store_op(size));
@@ -1078,7 +1098,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
     }
     // 第 2 パス: 生成
     let fpu = insns.iter().any(|i| x87::is_x87(i.mnemonic()));
-    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), bits, flag_mask: FALL, fpu, fdelta: 0 };
+    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), code_ptr: mem.code_pages_ptr(), bits, flag_mask: FALL, fpu, fdelta: 0 };
     if fpu {
         asm.cpu();
         asm.body.push(W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }));
@@ -1166,7 +1186,12 @@ fn xmm_ptr(asm: &mut Asm, i: &Instruction, n: u32, size: usize, insn_addr: u64, 
         OpKind::Memory => {
             let Opnd::Mem(mo, _) = operand(i, n)? else { return None };
             asm.calc_addr(&mo);
-            asm.resolve_ptr(size, insn_addr, count);
+            // 引数 0 のメモリは書き込み先
+            if n == 0 {
+                asm.resolve_ptr_w(size, insn_addr, count);
+            } else {
+                asm.resolve_ptr(size, insn_addr, count);
+            }
             asm.body.push(W::LocalGet(HP));
             Some(false)
         }

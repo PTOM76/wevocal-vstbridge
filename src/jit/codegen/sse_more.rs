@@ -142,7 +142,7 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
                     }
                     Opnd::Mem(mo, _) => {
                         asm.calc_addr(&mo);
-                        asm.resolve_ptr(s, insn_addr, count);
+                        asm.resolve_ptr_w(s, insn_addr, count);
                         asm.body.push(W::LocalGet(HP));
                         asm.cpu();
                         asm.body.extend([W::I64Load(xmm_arg(sx, 3)), store_op(s)]);

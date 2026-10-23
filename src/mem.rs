@@ -231,6 +231,11 @@ impl Memory {
         self.pages.as_ptr() as usize as u32
     }
 
+    /// code_pages の先頭（ホストの番地。JIT が、命令のあるページへの書き込みを見分けるのに使う）
+    pub fn code_pages_ptr(&self) -> u32 {
+        self.code_pages.as_ptr() as usize as u32
+    }
+
     /// 命令を読むための、addr から読めるだけ（最大 len）の写し
     pub fn fetch(&self, addr: u64, len: usize) -> R<&[u8]> {
         if addr >> 32 == 0 {

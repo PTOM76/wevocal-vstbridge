@@ -180,7 +180,7 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             if mem {
                 let Opnd::Mem(mo, size) = operand(i, 0)? else { return None };
                 asm.calc_addr(&mo);
-                asm.resolve_ptr(size, insn_addr, count);
+                asm.resolve_ptr_w(size, insn_addr, count);
                 asm.body.push(W::LocalGet(HP));
                 let a = |align| MemArg { offset: 0, align, memory_index: 0 };
                 if is_int(m) {
@@ -325,7 +325,7 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             if mem {
                 let Opnd::Mem(mo, _) = operand(i, 0)? else { return None };
                 asm.calc_addr(&mo);
-                asm.resolve_ptr(2, insn_addr, count);
+                asm.resolve_ptr_w(2, insn_addr, count);
                 asm.body.push(W::LocalGet(HP));
             }
             for (k, o) in c.iter().enumerate() {
