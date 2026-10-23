@@ -156,6 +156,25 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 cpu.write_op(mem, i, 0, r)?;
             }
         }
+        // cf を含めた (大きさ + 1) ビットで回す。of は数が 1 のときだけ書く
+        M::Rcl | M::Rcr => {
+            let size = dst_size(i);
+            let bits = size as u32 * 8;
+            let (a, _) = cpu.read_op(mem, i, 0)?;
+            let c = (if i.op_count() > 1 { cpu.read_op(mem, i, 1)?.0 } else { 1 } & if size == 8 { 63 } else { 31 }) as u32 % (bits + 1);
+            let a = a & mask(size);
+            if c != 0 {
+                let full = ((cpu.flags.cf as u128) << bits) | a as u128;
+                let all = (1u128 << (bits + 1)) - 1;
+                let r = if m == M::Rcl { ((full << c) | (full >> (bits + 1 - c))) & all } else { ((full >> c) | (full << (bits + 1 - c))) & all };
+                let v = r as u64 & mask(size);
+                if c == 1 {
+                    cpu.flags.of = if m == M::Rcl { sign(v, size) != ((r >> bits) & 1 == 1) } else { sign(a, size) != cpu.flags.cf };
+                }
+                cpu.flags.cf = (r >> bits) & 1 == 1;
+                cpu.write_op(mem, i, 0, v)?;
+            }
+        }
         // ecx（32 ビットでは ecx）を 1 減らし、0 でなければ分岐する（フラグは変えない）
         M::Loop | M::Loope | M::Loopne => {
             let mut ecx = cpu.regs[1] & mask(if cpu.width == 4 { 4 } else { 8 });
