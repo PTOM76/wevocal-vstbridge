@@ -267,8 +267,8 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         ("KERNEL32.DLL", "TlsAlloc") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0) })),
         ("KERNEL32.DLL", "TlsGetValue") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0) })),
         ("KERNEL32.DLL", "TlsSetValue") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(1) })),
-        // 画面（エディター）の API は gui_api.rs
-        ("USER32.DLL" | "GDI32.DLL", name) => crate::gui_api::resolve(name),
+        // 画面（エディター）の API は gui_api.rs（MSIMG32 の TransparentBlt、AlphaBlend も）
+        ("USER32.DLL" | "GDI32.DLL" | "MSIMG32.DLL", name) => crate::gui_api::resolve(name),
         (dll, name) => crate::win_stubs::resolve(dll, name),
     }
 }
