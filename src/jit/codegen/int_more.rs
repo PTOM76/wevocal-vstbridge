@@ -1,11 +1,13 @@
-//! 整数の命令の残り（cdq、cqo、32 ビットの div、idiv）を wasm に変換する（インタープリターの exec.rs と同じ動き。フラグは変えない）
+//! 整数の命令の残り（cdq、cqo、div、idiv、引数が 1 つの 32 ビットの mul、imul）を wasm に変換する（インタープリターの exec.rs と同じ動き）
 use super::*;
 
-/// 変換できるか。div、idiv は 32 ビットの引数だけ
+/// 変換できるか。mul、imul は 32 ビットの引数だけ
 pub(super) fn rw(i: &Instruction) -> Option<Rw> {
     let ok = match i.mnemonic() {
         M::Cdq | M::Cqo => true,
-        M::Div | M::Idiv => i.op_count() == 1 && int_operands_ok(i) && dst_size(i) == 4,
+        M::Div | M::Idiv => i.op_count() == 1 && int_operands_ok(i) && matches!(dst_size(i), 4 | 8),
+        // cf と of だけを書く
+        M::Mul | M::Imul if i.op_count() == 1 && int_operands_ok(i) && dst_size(i) == 4 => return Some(Rw { kill: FCF | FOF, emit: FCF | FOF, read: 0 }),
         _ => false,
     };
     ok.then_some(Rw { kill: 0, emit: 0, read: 0 })
@@ -24,6 +26,67 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             asm.store_reg(2, size);
         }
         // edx:eax を割り、商を eax、余りを edx に。0 で割るときと、符号つきの -1 で割るとき（wasm が止まる形）はインタープリターに任せる
+        M::Div | M::Idiv if dst_size(i) == 8 => {
+            // 割られる数が rax に収まる（rdx が rax の符号か 0）ときだけ。ほかと、0 と -1 で割るときはインタープリター
+            let signed = i.mnemonic() == M::Idiv;
+            asm.push_operand(&operand(i, 0)?, insn_addr, count);
+            asm.body.push(W::LocalTee(B));
+            asm.body.push(W::I64Eqz);
+            if signed {
+                asm.body.extend([W::LocalGet(B), W::I64Const(-1), W::I64Eq, W::I32Or]);
+            }
+            asm.load_reg(2);
+            if signed {
+                asm.load_reg(0);
+                asm.body.extend([W::I64Const(63), W::I64ShrS, W::I64Ne]);
+            } else {
+                asm.body.extend([W::I64Const(0), W::I64Ne]);
+            }
+            asm.body.push(W::I32Or);
+            asm.body.push(W::If(BlockType::Empty));
+            asm.emit_bail(insn_addr, count);
+            asm.body.push(W::End);
+            let (div, rem) = if signed { (W::I64DivS, W::I64RemS) } else { (W::I64DivU, W::I64RemU) };
+            // 割られる数を A に取ってから、余り（rdx）、商（rax）の順に書く
+            asm.load_reg(0);
+            asm.body.extend([W::LocalSet(A), W::LocalGet(A), W::LocalGet(B), rem]);
+            asm.store_reg(2, 8);
+            asm.body.extend([W::LocalGet(A), W::LocalGet(B), div]);
+            asm.store_reg(0, 8);
+        }
+        // edx:eax = eax × 引数。上位が下位の符号拡張（imul）か 0（mul）でなければ cf、of を立てる
+        M::Mul | M::Imul => {
+            let signed = i.mnemonic() == M::Imul;
+            asm.push_operand(&operand(i, 0)?, insn_addr, count);
+            if signed {
+                asm.body.push(W::I64Extend32S);
+            }
+            asm.load_reg(0);
+            asm.body.extend([W::I64Const(0xffff_ffff), W::I64And]);
+            if signed {
+                asm.body.push(W::I64Extend32S);
+            }
+            asm.body.extend([W::I64Mul, W::LocalSet(A)]);
+            if asm.flag_mask & (FCF | FOF) != 0 {
+                asm.body.push(W::LocalGet(A));
+                if signed {
+                    asm.body.extend([W::LocalGet(A), W::I64Extend32S, W::I64Ne]);
+                } else {
+                    asm.body.extend([W::I64Const(32), W::I64ShrU, W::I64Const(0), W::I64Ne]);
+                }
+                asm.body.push(W::LocalSet(GA));
+                for (bit, off) in [(FCF, asm.off.cf), (FOF, asm.off.of)] {
+                    if asm.flag_mask & bit != 0 {
+                        asm.cpu();
+                        asm.body.extend([W::LocalGet(GA), W::I32Store8(MemArg { offset: off, align: 0, memory_index: 0 })]);
+                    }
+                }
+            }
+            asm.body.push(W::LocalGet(A));
+            asm.store_reg(0, 4);
+            asm.body.extend([W::LocalGet(A), W::I64Const(32), W::I64ShrU]);
+            asm.store_reg(2, 4);
+        }
         M::Div | M::Idiv => {
             let signed = i.mnemonic() == M::Idiv;
             asm.push_operand(&operand(i, 0)?, insn_addr, count);

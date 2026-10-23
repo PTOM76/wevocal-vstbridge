@@ -755,6 +755,7 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
         _ if x87::is_x87(m) => x87::emit(asm, i, insn_addr, count),
         M::Push | M::Pop | M::Leave => stack::emit(asm, i, insn_addr, count),
         M::Cdq | M::Cqo | M::Div | M::Idiv => int_more::emit(asm, i, insn_addr, count),
+        M::Mul | M::Imul if i.op_count() == 1 => int_more::emit(asm, i, insn_addr, count),
         _ if is_cmov(m) => {
             let size = dst_size(i);
             let src = operand(i, 1)?;
@@ -1027,6 +1028,7 @@ fn insn_rw(i: &Instruction) -> Option<Rw> {
             }
         }
         Cdq | Cqo | Div | Idiv => return int_more::rw(i),
+        Mul | Imul if i.op_count() == 1 => return int_more::rw(i),
         Imul if i.op_count() >= 2 => {
             if !int_operands_ok(i) {
                 return None;
