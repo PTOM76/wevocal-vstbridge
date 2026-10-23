@@ -116,7 +116,15 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
         M::Cvttss2si | M::Cvttsd2si => {
             let f = if m == M::Cvttss2si { f32_of(src()?) as f64 } else { f64_of(src()?) };
             let size = i.op_register(0).size();
-            let n = if size == 8 { f as i64 as u64 } else { f as i32 as u32 as u64 };
+            // 範囲外と NaN は「整数の不定値」（最小の負の数）。Rust の as は飽和するので使わない
+            let t = f.trunc();
+            let n = if size == 8 {
+                if t.is_nan() || !(-9.223372036854775808e18..9.223372036854775808e18).contains(&t) { 1u64 << 63 } else { t as i64 as u64 }
+            } else if t.is_nan() || !(-2147483648.0..2147483648.0).contains(&t) {
+                0x8000_0000
+            } else {
+                t as i32 as u32 as u64
+            };
             cpu.set_reg(i.op_register(0), n)?;
             return Ok(true);
         }
