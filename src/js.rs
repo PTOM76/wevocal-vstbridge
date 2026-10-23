@@ -51,6 +51,12 @@ impl JsVst {
         if t == 0 { 0.0 } else { e.jit_insns as f64 / t as f64 }
     }
 
+    /// JIT で変換しない命令の名前（カンマ区切り、小文字。例 "bts,imul"。JIT の不具合を命令の種類で切り分けるため。調査用）
+    #[wasm_bindgen(js_name = setJitDeny)]
+    pub fn set_jit_deny(&mut self, names: &str) {
+        crate::jit::codegen::DENY.with(|d| *d.borrow_mut() = names.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+    }
+
     /// jitMisses のために数え始める（調査用。数えると遅くなる）
     #[wasm_bindgen(js_name = countJitMisses)]
     pub fn count_jit_misses(&mut self) {

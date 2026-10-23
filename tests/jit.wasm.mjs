@@ -18,6 +18,8 @@ function noise(seed) {
 function run(dll, jit) {
   const v = new JsVst(dll)
   v.setJit(jit)
+  // DENY=bts,imul で、その命令を JIT で変換しない（不具合の切り分け）
+  if (process.env.DENY) v.setJitDeny(process.env.DENY)
   if (jit && process.env.MISSES) v.countJitMisses()
   const ins = Math.max(1, v.numInputs), params = v.numParams
   const rnd = noise(1), knob = noise(2)

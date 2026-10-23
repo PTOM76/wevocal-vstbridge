@@ -1012,9 +1012,17 @@ const fn rw(kill: u8) -> Rw {
     Rw { kill, emit: kill, read: 0 }
 }
 
+thread_local! {
+    /// 変換しない命令の名前（小文字。調査用。JS の setJitDeny で決める）
+    pub static DENY: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// その命令が JIT で変換できるか（できるならフラグの書き読み）。できないなら None
 fn insn_rw(i: &Instruction) -> Option<Rw> {
     let m = i.mnemonic();
+    if DENY.with(|d| !d.borrow().is_empty() && d.borrow().contains(&format!("{m:?}").to_lowercase())) {
+        return None;
+    }
     if x87::is_x87(m) {
         return x87::rw(i);
     }
