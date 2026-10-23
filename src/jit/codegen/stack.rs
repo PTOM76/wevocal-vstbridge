@@ -4,7 +4,7 @@ use super::*;
 use iced_x86::CodeSize;
 
 /// push、pop、call、ret が動かす幅（32 ビットのコードは 4、64 ビットは 8）
-fn width(i: &Instruction) -> usize {
+pub(super) fn width(i: &Instruction) -> usize {
     if i.code_size() == CodeSize::Code64 { 8 } else { 4 }
 }
 
@@ -47,7 +47,7 @@ impl Asm {
         self.body.push(W::I64Store(MemArg { offset: off_reg(4), align: 3, memory_index: 0 }));
     }
     /// B の値を積む（rsp - w に書いて rsp を下げる）。番地が引けなければ、何も変えずに中断
-    fn push_b(&mut self, w: usize, insn_addr: u64, count: u32) {
+    pub(super) fn push_b(&mut self, w: usize, insn_addr: u64, count: u32) {
         self.load_reg(4);
         self.body.push(W::I64Const(w as i64));
         self.body.push(W::I64Sub);
@@ -61,7 +61,7 @@ impl Asm {
         self.set_rsp_from(A);
     }
     /// rsp から w バイトを B に読み、rsp を w + extra だけ上げる
-    fn pop_b(&mut self, w: usize, extra: u64, insn_addr: u64, count: u32) {
+    pub(super) fn pop_b(&mut self, w: usize, extra: u64, insn_addr: u64, count: u32) {
         self.load_reg(4);
         self.body.push(W::LocalTee(A));
         self.body.push(W::I32WrapI64);
@@ -77,7 +77,7 @@ impl Asm {
         self.set_rsp_from(A);
     }
     /// rip を局所 local の値にして、count を返す
-    fn emit_exit_dyn(&mut self, local: u32, count: u32) {
+    pub(super) fn emit_exit_dyn(&mut self, local: u32, count: u32) {
         self.fpu_sync();
         self.cpu();
         self.body.push(W::LocalGet(local));

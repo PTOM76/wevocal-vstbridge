@@ -1,4 +1,5 @@
-//! 分岐でつながる複数の基本ブロックを 1 つの wasm の関数にまとめる。ブロックの間は局所 PC と br_table で移り、Rust に戻らない
+//! 分岐でつながる複数の基本ブロックを 1 つの wasm の関数にまとめる。ブロックの間は局所 PC と br_table で移り、Rust に戻らない。
+//! 直接の call は、呼ぶ先と戻り先もまとめに入れる。ret は、取り出した番地がまとめた戻り先なら、そこへ移る
 use super::*;
 
 /// まとめるブロックの数と命令の数の上限
@@ -100,6 +101,32 @@ fn goto(asm: &mut Asm, idx: &[u64], target: u64, count: u32, depth: u32) {
     asm.fdelta = fdelta;
 }
 
+/// 飛び先が決まっている call か
+fn direct_call(i: &Instruction) -> bool {
+    i.flow_control() == FlowControl::Call && matches!(i.op_kind(0), OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64)
+}
+
+/// 終わりの call、ret。呼ぶ先や戻り先がまとめた中なら、Rust に戻らずに移る。ほかは stack::emit_term と同じ
+fn emit_flow(asm: &mut Asm, idx: &[u64], rets: &[u64], i: &Instruction, count: u32, depth: u32) {
+    let (w, at, before) = (stack::width(i), i.ip(), count - 1);
+    if direct_call(i) && idx.contains(&i.near_branch_target()) {
+        asm.body.extend([W::I64Const(i.next_ip() as i64), W::LocalSet(B)]);
+        asm.push_b(w, at, before);
+        goto(asm, idx, i.near_branch_target(), count, depth);
+    } else if i.flow_control() == FlowControl::Return && !rets.is_empty() {
+        let extra = if i.op_count() == 1 { i.immediate(0) } else { 0 };
+        asm.pop_b(w, extra, at, before);
+        for &r in rets {
+            asm.body.extend([W::LocalGet(B), W::I64Const(r as i64), W::I64Eq, W::If(BlockType::Empty)]);
+            goto(asm, idx, r, count, depth + 1);
+            asm.body.push(W::End);
+        }
+        asm.emit_exit_dyn(B, count);
+    } else {
+        stack::emit_term(asm, i, count);
+    }
+}
+
 /// start から、分岐でつながるブロックをまとめて変換する。先頭のブロックが作れないときは None
 pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> Option<Compiled> {
     // 分岐の先を幅優先でたどって集める（call、ret、間接の分岐の先はたどらない）
@@ -114,12 +141,13 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         }
         if let Some(b) = &b {
             total += b.insns.len();
-            let next: &[u64] = match b.term {
-                Term::Jmp(t) => &[t],
-                Term::Jcc(_, t, n) => &[t, n],
-                _ => &[],
+            let next = match b.term {
+                Term::Jmp(t) => vec![t],
+                Term::Jcc(_, t, n) => vec![t, n],
+                Term::Flow(i) if direct_call(&i) => vec![i.near_branch_target(), i.next_ip()],
+                _ => vec![],
             };
-            for &t in next {
+            for t in next {
                 if addrs.len() < MAX_BLOCKS && total < MAX_INSNS && !addrs.contains(&t) {
                     addrs.push(t);
                 }
@@ -148,6 +176,11 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         idx.push(addrs[k]);
         bodies.push((body, asm.fdelta, b));
     }
+    // まとめた中の、直接の call の戻り先（呼ぶ先もまとめた中のもの）
+    let rets: Vec<u64> = bodies.iter().filter_map(|(_, _, b)| match b.term {
+        Term::Flow(i) if direct_call(&i) && idx.contains(&i.near_branch_target()) && idx.contains(&i.next_ip()) => Some(i.next_ip()),
+        _ => None,
+    }).collect();
     // 組み立て: loop { block … block { br_table PC } ブロック 0 … } の入れ子
     let n = bodies.len() as u32;
     if fpu {
@@ -172,7 +205,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         match b.term {
             Term::ExitAt(a) | Term::Jmp(a) => goto(&mut asm, &idx, a, count, depth),
             // 終わりの命令も 1 つと数える
-            Term::Flow(i) => stack::emit_term(&mut asm, &i, count + 1),
+            Term::Flow(i) => emit_flow(&mut asm, &idx, &rets, &i, count + 1, depth),
             Term::Jcc(cc, t, next) => {
                 asm.push_cond(cc);
                 asm.body.push(W::If(BlockType::Empty));
