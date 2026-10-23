@@ -28,6 +28,15 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
                 write_wstr(e, arg(e, 2)?, "C:\\vst")?;
                 Ok(1)
             })),
+            // 同じく偽の場所を、確保した文字列で返す（4 つ目の引数に番地を書く。解放の CoTaskMemFree は何もしない）
+            ("SHELL32.DLL", "SHGetKnownFolderPath") => Some(Box::new(|e: &mut Emu| -> R<u64> {
+                let p = e.mem.alloc(16);
+                write_wstr(e, p, "C:\\vst")?;
+                let w = if e.bits() == 64 { 8 } else { 4 };
+                e.mem.write_n(arg(e, 4)?, w, p)?;
+                Ok(0)
+            })),
+            ("OLE32.DLL", "CoTaskMemFree") => ok(0),
             _ => None,
         };
     }
@@ -89,6 +98,31 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
             let p = arg(e, 1)?;
             e.mem.write(p, &[0u8; 104])?;
             e.mem.write_n(p, 4, 104)?;
+            Ok(0)
+        })),
+        // スレッドは動かせないので、作ったことにして偽のハンドルを返す（スレッドの関数は呼ばない。6 つ目の引数にスレッドの ID を書く）
+        "CreateThread" => Some(Box::new(|e: &mut Emu| -> R<u64> {
+            let id = arg(e, 6)?;
+            if id != 0 {
+                e.mem.write_n(id, 4, 2)?;
+            }
+            Ok(0x7000_1000)
+        })),
+        // SYSTEM_INFO（ページは 4KB、確保の単位は 64KB、CPU は 1 つ）
+        "GetSystemInfo" | "GetNativeSystemInfo" => Some(Box::new(|e: &mut Emu| -> R<u64> {
+            let p = arg(e, 1)?;
+            let (w, arch, ty) = if e.bits() == 64 { (8, 9, 8664) } else { (4, 0, 586) };
+            e.mem.write(p, &vec![0u8; 16 + 5 * w])?;
+            e.mem.write_n(p, 2, arch)?;
+            e.mem.write_n(p + 4, 4, 0x1000)?;
+            e.mem.write_n(p + 8, w, 0x1_0000)?;
+            e.mem.write_n(p + 8 + w as u64, w, 0x7ffe_ffff)?;
+            e.mem.write_n(p + 8 + 2 * w as u64, w, 1)?;
+            let q = p + 8 + 3 * w as u64;
+            e.mem.write_n(q, 4, 1)?;
+            e.mem.write_n(q + 4, 4, ty)?;
+            e.mem.write_n(q + 8, 4, 0x1_0000)?;
+            e.mem.write_n(q + 12, 2, 6)?;
             Ok(0)
         })),
         // ファイルは 1 つも無いことにする（INVALID_FILE_ATTRIBUTES、INVALID_HANDLE_VALUE）

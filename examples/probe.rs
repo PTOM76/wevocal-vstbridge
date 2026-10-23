@@ -6,7 +6,7 @@ fn main() {
         Ok(v) => v,
         Err(e) => return println!("load: {}", e.0),
     };
-    println!("name: {:?} params={}", v.name().map_err(|e| e.0), v.num_params);
+    println!("name: {:?} params={} in={} out={}", v.name().map_err(|e| e.0), v.num_params, v.num_inputs, v.num_outputs);
     let _ = v.set_param(0, 0.25);
     println!("param0={:?}", v.get_param(0).map_err(|e| e.0));
     let s: Vec<f32> = (0..8).map(|i| (2.0 * 3.14159265f32 * 1000.0 * i as f32 / 48000.0).sin()).collect();
