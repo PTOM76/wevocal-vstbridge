@@ -22,6 +22,7 @@ const D1: u32 = 9;
 const FT: u32 = 10; // i32 ブロックの頭の x87 のスタックの先頭（fpu_top）
 const T0: u32 = 11; // i32 作業用
 
+mod stack;
 mod x87;
 
 fn off_reg(idx: usize) -> u64 {
@@ -702,6 +703,7 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
         }
         // 条件が偽なら書かない（上位 32 ビットも消さない。インタープリターと同じ）。読みは条件によらず行う
         _ if x87::is_x87(m) => x87::emit(asm, i, insn_addr, count),
+        M::Push | M::Pop => stack::emit(asm, i, insn_addr, count),
         _ if is_cmov(m) => {
             let size = dst_size(i);
             let src = operand(i, 1)?;
@@ -884,6 +886,8 @@ enum Term {
     Jmp(u64),
     /// 条件分岐（条件コード, 飛び先, 次）
     Jcc(ConditionCode, u64, u64),
+    /// call、ret、間接の jmp（stack.rs）
+    Flow(Instruction),
 }
 
 /// 条件コードが読むフラグ
@@ -940,6 +944,9 @@ fn insn_rw(i: &Instruction) -> Option<Rw> {
     let m = i.mnemonic();
     if x87::is_x87(m) {
         return x87::rw(i);
+    }
+    if matches!(m, M::Push | M::Pop) {
+        return stack::rw(i);
     }
     if is_cmov(m) || is_setcc(m) {
         if !int_operands_ok(i) || (is_cmov(m) && i.op_kind(0) != OpKind::Register) {
@@ -1019,6 +1026,8 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
                 term = Term::Jmp(insn.near_branch_target());
             } else if is_jcc(&insn) {
                 term = Term::Jcc(insn.condition_code(), insn.near_branch_target(), next);
+            } else if stack::term_ok(&insn) {
+                term = Term::Flow(insn);
             } else {
                 if insns.is_empty() {
                     return None;
@@ -1069,6 +1078,8 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
     match term {
         Term::ExitAt(a) => asm.emit_exit(a, count),
         Term::Jmp(t) => asm.emit_exit(t, count),
+        // 終わりの命令も 1 つと数える
+        Term::Flow(i) => stack::emit_term(&mut asm, &i, count + 1),
         Term::Jcc(cc, t, next) => {
             asm.fpu_sync();
             asm.cpu();
