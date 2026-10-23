@@ -4,6 +4,7 @@ pub mod blocks;
 pub mod cpu;
 pub mod emu;
 pub mod exec;
+pub mod f80;
 pub mod fast;
 pub mod gdi;
 pub mod gui;

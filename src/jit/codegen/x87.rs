@@ -31,7 +31,7 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
     let m = i.mnemonic();
     if mem_op(i) {
         let Opnd::Mem(_, size) = operand(i, 0)? else { return None };
-        let ok = if is_int(m) { matches!(size, 2 | 4 | 8) } else if matches!(m, M::Fnstsw | M::Fnstcw | M::Fldcw) { size == 2 } else { matches!(size, 4 | 8) };
+        let ok = if is_int(m) { matches!(size, 2 | 4 | 8) } else if matches!(m, M::Fnstsw | M::Fnstcw | M::Fldcw) { size == 2 } else if matches!(m, M::Fld | M::Fstp) { matches!(size, 4 | 8 | 10) } else { matches!(size, 4 | 8) };
         if !ok {
             return None;
         }
@@ -53,6 +53,17 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
 }
 
 impl Asm {
+    /// Rust の関数 f(cpu, 引数) を表の添字で呼ぶ。先頭とずれを Cpu に書き戻してから呼び、先頭を読み直す（f が積んだり下ろしたりしてよい）
+    fn call_rust(&mut self, f: usize, arg: W<'static>) {
+        let fdelta = self.fdelta;
+        self.fpu_sync();
+        self.body.extend([W::LocalGet(FT), W::I32Const(fdelta), W::I32Add, W::I32Const(7), W::I32And, W::LocalSet(FT)]);
+        self.fdelta = 0;
+        self.cpu();
+        self.body.extend([arg, W::I32Const(f as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
+        self.cpu();
+        self.body.extend([W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }), W::LocalSet(FT)]);
+    }
     /// st(n)（今のずれから見た）の f64 の入れ物のホスト番地（i32）を積む。読み書きの MemArg の offset に fpu の位置を入れる
     fn st_addr(&mut self, n: i32) {
         self.cpu();
@@ -150,6 +161,18 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
     let mem = mem_op(i);
     let reg = |n: u32| streg(i.op_register(n));
     match m {
+        // 80 ビットのメモリは、Rust（インタープリターと同じ変換）を呼ぶ
+        M::Fld | M::Fstp if mem && i.memory_size().size() == 10 => {
+            let Opnd::Mem(mo, _) = operand(i, 0)? else { return None };
+            asm.calc_addr(&mo);
+            if m == M::Fld {
+                asm.resolve_ptr(10, insn_addr, count);
+                asm.call_rust(crate::jit::f80_load as *const () as usize, W::LocalGet(HP));
+            } else {
+                asm.resolve_ptr_w(10, insn_addr, count);
+                asm.call_rust(crate::jit::f80_store_pop as *const () as usize, W::LocalGet(HP));
+            }
+        }
         M::Fld | M::Fild => {
             if mem {
                 asm.mem_f64(i, insn_addr, count)?;
@@ -366,14 +389,7 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
         // 超越関数などは Rust（インタープリターと同じ計算）を呼ぶ。先頭とずれを Cpu に書き戻してから呼び、先頭を読み直す
         _ if crate::x87::TRANSCEND.contains(&m) => {
             let k = crate::x87::TRANSCEND.iter().position(|&t| t == m)?;
-            let fdelta = asm.fdelta;
-            asm.fpu_sync();
-            asm.body.extend([W::LocalGet(FT), W::I32Const(fdelta), W::I32Add, W::I32Const(7), W::I32And, W::LocalSet(FT)]);
-            asm.fdelta = 0;
-            asm.cpu();
-            asm.body.extend([W::I32Const(k as i32), W::I32Const(crate::jit::x87_helper as *const () as usize as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
-            asm.cpu();
-            asm.body.extend([W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }), W::LocalSet(FT)]);
+            asm.call_rust(crate::jit::x87_helper as *const () as usize, W::I32Const(k as i32));
         }
         _ => return None,
     }

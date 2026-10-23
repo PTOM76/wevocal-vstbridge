@@ -34,6 +34,12 @@ fn read_mem(cpu: &Cpu, mem: &Memory, i: &Instruction) -> R<f64> {
             }
         }
         2 => mem.read_n(a, 2)? as i16 as f64, // fild word
+        // fld tbyte（80 ビット）
+        10 if !is_int(i) => {
+            let mut b = [0u8; 10];
+            mem.read(a, &mut b)?;
+            crate::f80::to_f64(b)
+        }
         _ => return Err(Fault(format!("x87 mem size {size}"))),
     })
 }
@@ -69,6 +75,8 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                     // fisttp は 0 方向への切り捨て、fist/fistp は丸め（最も近い）
                     let n = if m == M::Fisttp { v.trunc() } else { cpu.fround(v) } as i64;
                     mem.write_n(a, size, n as u64)?;
+                } else if size == 10 {
+                    mem.write(a, &crate::f80::from_f64(v))?;
                 } else if size == 4 {
                     let f = v as f32;
                     if !f.is_finite() && std::env::var("VSTBRIDGE_NAN").is_ok() {

@@ -41,6 +41,21 @@ pub extern "C" fn x87_helper(cpu: u32, k: u32) {
     crate::x87::transcend(cpu, crate::x87::TRANSCEND[k as usize]);
 }
 
+/// JIT の遅い道: fld tbyte。hp は 10 バイトのホストの番地
+pub extern "C" fn f80_load(cpu: u32, hp: u32) {
+    // SAFETY: x87_helper と同じ。hp は生成したコードがページ表で引いた、10 バイトが読める番地
+    let (cpu, b) = unsafe { (&mut *(cpu as usize as *mut crate::cpu::Cpu), *(hp as usize as *const [u8; 10])) };
+    cpu.fpush(crate::f80::to_f64(b));
+}
+
+/// JIT の遅い道: fstp tbyte
+pub extern "C" fn f80_store_pop(cpu: u32, hp: u32) {
+    // SAFETY: f80_load と同じ
+    let cpu = unsafe { &mut *(cpu as usize as *mut crate::cpu::Cpu) };
+    unsafe { *(hp as usize as *mut [u8; 10]) = crate::f80::from_f64(cpu.st(0)) };
+    cpu.fpop();
+}
+
 /// つなぎ方の確かめ: 引数に 42 を足して返す関数を作って呼ぶ
 #[cfg(target_arch = "wasm32")]
 pub fn selftest(x: u32) -> Result<u32, String> {
