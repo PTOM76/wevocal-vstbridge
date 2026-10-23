@@ -15,15 +15,32 @@ struct Block {
     table: Vec<u64>,
 }
 
-/// jmp [index*w + 表] の表から、飛び先の候補を読む（近くの番地で、命令として読めるものだけ。最大 64 個）
-fn table_targets(mem: &Memory, i: &Instruction) -> Vec<u64> {
-    let w = stack::width(i) as u64;
-    if i.flow_control() != FlowControl::IndirectBranch || i.op_kind(0) != OpKind::Memory || i.memory_base() != Register::None || i.memory_index() == Register::None || i.memory_index_scale() as u64 != w {
+/// 表を引く間接の jmp から、飛び先の候補を読む（近くの番地で、命令として読めるものだけ。最大 64 個）。
+/// jmp [index*w + 表] と、64 ビットの gcc の movsxd rX, [rB + index*4 + d]; add rX, rB; jmp rX（rB は変換するときの値を手がかりにする）
+fn table_targets(mem: &Memory, insns: &[Instruction], i: &Instruction, regs: &[u64; 16]) -> Vec<u64> {
+    if i.flow_control() != FlowControl::IndirectBranch {
         return Vec::new();
     }
+    let w = stack::width(i) as u64;
+    // 表の番地、1 つの大きさ、読んだ値を飛び先にする式
+    let (table, size, base) = if i.op_kind(0) == OpKind::Memory && i.memory_base() == Register::None && i.memory_index() != Register::None && i.memory_index_scale() as u64 == w {
+        (i.memory_displacement64(), w, None)
+    } else if let (OpKind::Register, [.., ld, add]) = (i.op_kind(0), insns) {
+        let x = i.op_register(0);
+        let b = ld.memory_base();
+        let ok = ld.mnemonic() == M::Movsxd && ld.op_register(0) == x && ld.op_kind(1) == OpKind::Memory && ld.memory_index_scale() == 4 && add.mnemonic() == M::Add && add.op_kind(0) == OpKind::Register && add.op_register(0) == x && add.op_kind(1) == OpKind::Register && add.op_register(1) == b;
+        let Some((bi, 8)) = gpr(b).filter(|_| ok) else { return Vec::new() };
+        (regs[bi].wrapping_add(ld.memory_displacement64()), 4, Some(regs[bi]))
+    } else {
+        return Vec::new();
+    };
     let mut v = Vec::new();
     for k in 0..64 {
-        let Ok(t) = mem.read_n(i.memory_displacement64().wrapping_add(k * w), w as usize) else { break };
+        let Ok(t) = mem.read_n(table.wrapping_add(k * size), size as usize) else { break };
+        let t = match base {
+            Some(b) => b.wrapping_add(t as u32 as i32 as i64 as u64),
+            None => t,
+        };
         if t.abs_diff(i.ip()) > 0x10_0000 || mem.read_n(t, 1).is_err() {
             break;
         }
@@ -35,7 +52,7 @@ fn table_targets(mem: &Memory, i: &Instruction) -> Vec<u64> {
 }
 
 /// start から 1 つの基本ブロックを読む。先頭の命令から変換できないときは None
-fn scan(mem: &Memory, bits: u32, start: u64, max_block: usize) -> Option<Block> {
+fn scan(mem: &Memory, bits: u32, start: u64, max_block: usize, regs: &[u64; 16]) -> Option<Block> {
     let mut insns: Vec<Instruction> = Vec::new();
     let mut rip = start;
     let term;
@@ -81,7 +98,7 @@ fn scan(mem: &Memory, bits: u32, start: u64, max_block: usize) -> Option<Block> 
         }
     }
     let table = match &term {
-        Term::Flow(i) => table_targets(mem, i),
+        Term::Flow(i) => table_targets(mem, &insns, i, regs),
         _ => Vec::new(),
     };
     Some(Block { insns, term, table })
@@ -164,14 +181,15 @@ fn emit_flow(asm: &mut Asm, idx: &[u64], rets: &[u64], table: &[u64], i: &Instru
 }
 
 /// start から、分岐でつながるブロックをまとめて変換する。先頭のブロックが作れないときは None
-pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> Option<Compiled> {
+/// regs は変換するときのレジスタ（switch の表の場所の手がかり）
+pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs: &[u64; 16]) -> Option<Compiled> {
     // 分岐の先を幅優先でたどって集める（call、ret、間接の分岐の先はたどらない）
     let mut addrs = vec![start];
     let mut blocks: Vec<Option<Block>> = Vec::new();
     let mut total = 0;
     let mut k = 0;
     while k < addrs.len() {
-        let b = scan(mem, bits, addrs[k], max_block);
+        let b = scan(mem, bits, addrs[k], max_block, regs);
         if k == 0 && b.is_none() {
             return None;
         }

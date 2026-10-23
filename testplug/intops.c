@@ -1,5 +1,5 @@
-﻿// JIT を確かめるための VST2。音の処理で、引数が 1 つの mul と imul、32 と 64 ビットの div と idiv、switch の表（間接の jmp）、
-// x87 の fsin、fcos、fpatan を使う。外部の DLL を import しない（-nostdlib）
+﻿// JIT を確かめるための VST2。音の処理で、引数が 1 つの mul と imul（32、64 ビット）、32 と 64 ビットの div と idiv、switch の表（間接の jmp）、
+// x87 の fsin、fcos、fpatan、80 ビットのメモリの読み書きを使う。外部の DLL を import しない（-nostdlib）
 #include "vst2.h"
 #include <stdint.h>
 
@@ -41,6 +41,26 @@ static int32_t imul1(int32_t a, int32_t b) {
   __asm__("imull %3" : "=a"(lo), "=d"(hi) : "a"(a), "r"(b) : "cc");
   return lo + hi;
 }
+/// 引数が 1 つの 64 ビットの mul、imul（上位と下位を混ぜる）
+static uint64_t mul64(uint64_t a, uint64_t b) {
+  uint64_t lo, hi;
+  __asm__("mulq %3" : "=a"(lo), "=d"(hi) : "a"(a), "r"(b) : "cc");
+  return lo ^ hi;
+}
+static int64_t imul64(int64_t a, int64_t b) {
+  int64_t lo, hi;
+  __asm__("imulq %3" : "=a"(lo), "=d"(hi) : "a"(a), "r"(b) : "cc");
+  return lo + hi * 7;
+}
+/// 80 ビットのメモリへ書いて読み戻す（fstp tbyte、fld tbyte）。途中で 80 ビットの値を少し変える
+static double f80(double x) {
+  unsigned char t[10];
+  double r;
+  __asm__ volatile("fldl %1; fstpt %0" : "=m"(t) : "m"(x));
+  t[0] ^= 0x55;
+  __asm__ volatile("fldt %1; fstpl %0" : "=m"(r) : "m"(t));
+  return r;
+}
 /// 64 ビットの div（rdx:rax ÷ r）。rdx が 0 でないときも通す
 static uint64_t div64(uint64_t hi, uint64_t lo, uint64_t d) {
   uint64_t q, r;
@@ -70,6 +90,8 @@ static float shape(float x, int c) {
   int32_t im = imul1(v, (int32_t)s >> 8);
   uint64_t dv = div64(s & 3, (uint64_t)m << 20 | s, (s >> 4) | 0x100000000ull);
   int64_t iv = idiv64((int64_t)v * 100003 - (int64_t)s, (int64_t)(s % 97) - 48 | 1);
+  uint64_t m64 = mul64((uint64_t)s * 0x9e3779b97f4a7c15ull, (uint64_t)v * 0x100000001ull + s);
+  int64_t i64 = imul64((int64_t)v * -77777777777ll, (int64_t)s << 31);
   int32_t sw;
   switch (s % 7) {
   case 0: sw = v / 3; break;
@@ -81,7 +103,8 @@ static float shape(float x, int c) {
   default: sw = -v; break;
   }
   double t = trig((double)x * 3.0 + (double)(s & 255) / 64.0);
-  return x * amount + (float)sw * 1e-9f + (float)t * 0.01f;
+  double q = f80((double)x * 1e-3 + (double)(m64 >> 40) + (double)(i64 >> 40) * 1e-6);
+  return x * amount + (float)sw * 1e-9f + (float)t * 0.01f + (float)(q - (double)(m64 >> 40)) * 0.1f;
 }
 
 static void processReplacing(AEffect *e, float **in, float **out, int32_t n) {

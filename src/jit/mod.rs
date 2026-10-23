@@ -103,7 +103,7 @@ impl Jit {
 #[cfg(target_arch = "wasm32")]
 impl Jit {
     /// rip のブロックの変換済み関数。まだなら、回数を数え、十分なら変換する
-    pub fn get(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize) -> Option<install::JitFn> {
+    pub fn get(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize, regs: &[u64; 16]) -> Option<install::JitFn> {
         if let Some(f) = self.funcs.get(&rip) {
             return *f;
         }
@@ -112,7 +112,7 @@ impl Jit {
         if *h < self.threshold {
             return None;
         }
-        let f = codegen::compile_block(mem, bits, rip, max_block).and_then(|c| {
+        let f = codegen::compile_block(mem, bits, rip, max_block, regs).and_then(|c| {
             let bytes = module(&c.locals, &c.body);
             install::install(&bytes).ok()
         });

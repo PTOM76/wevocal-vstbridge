@@ -139,7 +139,7 @@ impl Emu {
             #[cfg(target_arch = "wasm32")]
             if self.jit.on {
                 let bits = self.bits();
-                if let Some(f) = self.jit.get(&self.mem, bits, rip, 256) {
+                if let Some(f) = self.jit.get(&self.mem, bits, rip, 256, &self.cpu.regs) {
                     let cpu_ptr = (&mut self.cpu as *mut crate::cpu::Cpu) as usize as u32;
                     let n = f(cpu_ptr);
                     self.cpu.steps += n as u64;
