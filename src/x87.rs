@@ -182,10 +182,11 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
         }
         // 比較（C3、C2、C0 を決める）
         M::Fcom | M::Fcomp | M::Fcompp | M::Fucom | M::Fucomp | M::Fucompp => {
+            // iced はレジスタの形を [ST0, ST(i)] の 2 オペランドで表す。比べる相手は最後の引数（fxch と同じ）
             let b = if mem_op {
                 read_mem(cpu, mem, i)?
             } else if i.op_count() > 0 {
-                cpu.st(streg(i.op_register(0)).unwrap_or(1))
+                cpu.st(streg(i.op_register(i.op_count() - 1)).unwrap_or(1))
             } else {
                 cpu.st(1)
             };

@@ -19,6 +19,10 @@ const F0: u32 = 6; // f32 作業用
 const F1: u32 = 7;
 const D0: u32 = 8; // f64 作業用
 const D1: u32 = 9;
+const FT: u32 = 10; // i32 ブロックの頭の x87 のスタックの先頭（fpu_top）
+const T0: u32 = 11; // i32 作業用
+
+mod x87;
 
 fn off_reg(idx: usize) -> u64 {
     (offset_of!(Cpu, regs) + idx * 8) as u64
@@ -83,6 +87,10 @@ struct Asm {
     bits: u32,
     /// 今の命令で実際に書くフラグ（使われるもの）だけのビット。CF=1,ZF=2,SF=4,OF=8,PF=16
     flag_mask: u8,
+    /// x87 を使うブロックか（FT を頭で読み、抜けるときに先頭と深さを書き戻す）
+    fpu: bool,
+    /// ブロックの頭からの x87 のスタックの先頭のずれ（積むと 1 減る。変換するときに数える）
+    fdelta: i32,
 }
 const FCF: u8 = 1;
 const FZF: u8 = 2;
@@ -178,8 +186,30 @@ impl Asm {
         self.body.push(W::I32Add);
         self.body.push(W::LocalSet(HP));
     }
+    /// x87 のスタックの先頭と深さを、今のずれで書き戻す（ブロックから抜ける所で）
+    fn fpu_sync(&mut self) {
+        if !self.fpu || self.fdelta == 0 {
+            return;
+        }
+        let (top, depth) = (offset_of!(Cpu, fpu_top) as u64, offset_of!(Cpu, fpu_depth) as u64);
+        self.cpu();
+        self.body.push(W::LocalGet(FT));
+        self.body.push(W::I32Const(self.fdelta));
+        self.body.push(W::I32Add);
+        self.body.push(W::I32Const(7));
+        self.body.push(W::I32And);
+        self.body.push(W::I32Store(MemArg { offset: top, align: 2, memory_index: 0 }));
+        // 積むと深さが 1 増える（先頭は 1 減る）
+        self.cpu();
+        self.cpu();
+        self.body.push(W::I32Load(MemArg { offset: depth, align: 2, memory_index: 0 }));
+        self.body.push(W::I32Const(-self.fdelta));
+        self.body.push(W::I32Add);
+        self.body.push(W::I32Store(MemArg { offset: depth, align: 2, memory_index: 0 }));
+    }
     /// rip を v にして、count を積んで返す
     fn emit_exit(&mut self, v: u64, count: u32) {
+        self.fpu_sync();
         self.cpu();
         self.body.push(W::I64Const(v as i64));
         self.body.push(W::I64Store(MemArg { offset: self.off.rip, align: 3, memory_index: 0 }));
@@ -188,6 +218,8 @@ impl Asm {
     }
     /// rip を命令の番地にし、bail=1 にして count を返す
     fn emit_bail(&mut self, insn_addr: u64, count: u32) {
+        // 中断した命令はまだ何も変えていない前提（x87 は、出し入れをメモリの読み書きのあとにする）
+        self.fpu_sync();
         self.cpu();
         self.body.push(W::I64Const(insn_addr as i64));
         self.body.push(W::I64Store(MemArg { offset: self.off.rip, align: 3, memory_index: 0 }));
@@ -669,6 +701,7 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
             emit_store_dst(asm, i, 1, insn_addr, count)
         }
         // 条件が偽なら書かない（上位 32 ビットも消さない。インタープリターと同じ）。読みは条件によらず行う
+        _ if x87::is_x87(m) => x87::emit(asm, i, insn_addr, count),
         _ if is_cmov(m) => {
             let size = dst_size(i);
             let src = operand(i, 1)?;
@@ -905,6 +938,9 @@ const fn rw(kill: u8) -> Rw {
 /// その命令が JIT で変換できるか（できるならフラグの書き読み）。できないなら None
 fn insn_rw(i: &Instruction) -> Option<Rw> {
     let m = i.mnemonic();
+    if x87::is_x87(m) {
+        return x87::rw(i);
+    }
     if is_cmov(m) || is_setcc(m) {
         if !int_operands_ok(i) || (is_cmov(m) && i.op_kind(0) != OpKind::Register) {
             return None;
@@ -1015,7 +1051,13 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         need = (need & !f.kill) | f.read;
     }
     // 第 2 パス: 生成
-    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), bits, flag_mask: FALL };
+    let fpu = insns.iter().any(|i| x87::is_x87(i.mnemonic()));
+    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), bits, flag_mask: FALL, fpu, fdelta: 0 };
+    if fpu {
+        asm.cpu();
+        asm.body.push(W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }));
+        asm.body.push(W::LocalSet(FT));
+    }
     for (k, insn) in insns.iter().enumerate() {
         asm.flag_mask = live[k];
         if emit_insn(&mut asm, insn, insn.ip(), k as u32).is_none() {
@@ -1028,6 +1070,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         Term::ExitAt(a) => asm.emit_exit(a, count),
         Term::Jmp(t) => asm.emit_exit(t, count),
         Term::Jcc(cc, t, next) => {
+            asm.fpu_sync();
             asm.cpu();
             asm.body.push(W::I64Const(t as i64));
             asm.body.push(W::I64Const(next as i64));
@@ -1042,7 +1085,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
 }
 
 fn finish(asm: Asm) -> Compiled {
-    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64)], body: asm.body }
+    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (2, ValType::I32)], body: asm.body }
 }
 
 fn is_jcc(i: &Instruction) -> bool {
