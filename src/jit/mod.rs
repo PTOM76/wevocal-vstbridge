@@ -85,7 +85,7 @@ impl Jit {
         if *h < self.threshold {
             return None;
         }
-        let f = codegen::compile_block(mem, bits, rip, 256).and_then(|c| {
+        let f = codegen::compile_block(mem, bits, rip, max_block).and_then(|c| {
             let bytes = module(&c.locals, &c.body);
             install::install(&bytes).ok()
         });

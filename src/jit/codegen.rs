@@ -21,10 +21,12 @@ const D0: u32 = 8; // f64 作業用
 const D1: u32 = 9;
 const FT: u32 = 10; // i32 ブロックの頭の x87 のスタックの先頭（fpu_top）
 const T0: u32 = 11; // i32 作業用
-const CNT: u32 = 12; // i32 自分へ戻るループで、前の周までに実行した命令の数
+const CNT: u32 = 12; // i32 前のブロック（周）までに実行した命令の数
+const PC: u32 = 13; // i32 次に動かす、まとめたブロックの番号
 /// ループを回す命令の数の上限（これを超えたら抜けて、命令数の見張りに戻す）
 const LOOP_LIMIT: i32 = 100_000;
 
+mod region;
 mod sse_more;
 mod stack;
 mod x87;
@@ -920,6 +922,8 @@ fn src_size(i: &Instruction) -> usize {
 
 /// ブロックを変換する。first の命令が対応しないなどで作れないときは None。
 /// 戻り値は (wasm の関数本体の局所と命令列) ではなく、呼び出し側が module() に渡せる body
+pub use region::compile_block;
+
 pub struct Compiled {
     pub locals: Vec<(u32, ValType)>,
     pub body: Vec<W<'static>>,
@@ -1053,133 +1057,8 @@ fn insn_flags(i: &Instruction) -> Option<u8> {
     })
 }
 
-/// start から基本ブロックを変換する。pages_ptr はページ表の先頭（ホストの番地、i32）
-pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> Option<Compiled> {
-    // 第 1 パス: 命令を集めて、終わり方を決める
-    let mut insns: Vec<Instruction> = Vec::new();
-    let mut rip = start;
-    let term;
-    loop {
-        let bytes = mem.fetch(rip, 16).ok()?;
-        let mut dec = Decoder::with_ip(bits, bytes, rip, DecoderOptions::NONE);
-        let insn = dec.decode();
-        if insn.is_invalid() {
-            if insns.is_empty() {
-                return None;
-            }
-            term = Term::ExitAt(rip);
-            break;
-        }
-        let next = insn.next_ip();
-        if insn.flow_control() != FlowControl::Next {
-            if insn.mnemonic() == M::Jmp && matches!(insn.op_kind(0), OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64) {
-                term = Term::Jmp(insn.near_branch_target());
-            } else if is_jcc(&insn) {
-                term = Term::Jcc(insn.condition_code(), insn.near_branch_target(), next);
-            } else if stack::term_ok(&insn) {
-                term = Term::Flow(insn);
-            } else {
-                if insns.is_empty() {
-                    return None;
-                }
-                term = Term::ExitAt(rip);
-            }
-            break;
-        }
-        if insn_rw(&insn).is_none() {
-            if insns.is_empty() {
-                return None;
-            }
-            term = Term::ExitAt(rip);
-            break;
-        }
-        insns.push(insn);
-        rip = next;
-        if insns.len() >= max_block {
-            term = Term::ExitAt(rip);
-            break;
-        }
-    }
-    // フラグの生死（後ろ向き。ブロック末では全フラグ生存とみなす）。読まれる前に必ず上書きされるフラグは作らない
-    let n = insns.len();
-    let mut live = vec![0u8; n];
-    let mut need = FALL;
-    for k in (0..n).rev() {
-        let f = insn_rw(&insns[k])?;
-        live[k] = f.emit & need;
-        need = (need & !f.kill) | f.read;
-    }
-    // 第 2 パス: 生成
-    let fpu = insns.iter().any(|i| x87::is_x87(i.mnemonic()));
-    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), code_ptr: mem.code_pages_ptr(), bits, flag_mask: FALL, fpu, fdelta: 0 };
-    if fpu {
-        asm.cpu();
-        asm.body.push(W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }));
-        asm.body.push(W::LocalSet(FT));
-    }
-    // 終わりの分岐が自分の頭へ戻るなら、wasm の loop で回す（Rust に戻らずに次の周へ）
-    let looped = n > 0 && matches!(term, Term::Jcc(_, t, _) | Term::Jmp(t) if t == start);
-    if looped {
-        asm.body.push(W::Loop(BlockType::Empty));
-    }
-    for (k, insn) in insns.iter().enumerate() {
-        asm.flag_mask = live[k];
-        if emit_insn(&mut asm, insn, insn.ip(), k as u32).is_none() {
-            // insn_flags が対応と判断したのに生成できない → 安全のためこのブロックは作らない
-            return None;
-        }
-    }
-    let count = n as u32;
-    if looped {
-        // 戻るとき: x87 の先頭を書き戻して FT を進め、命令の数を足して、上限までなら頭へ。上限なら頭を rip にして抜ける
-        let back = |asm: &mut Asm, depth: u32| {
-            asm.body.extend([W::LocalGet(CNT), W::I32Const(count as i32), W::I32Add, W::LocalSet(CNT)]);
-            let fdelta = asm.fdelta;
-            if asm.fpu {
-                asm.fpu_sync();
-                asm.body.extend([W::LocalGet(FT), W::I32Const(fdelta), W::I32Add, W::I32Const(7), W::I32And, W::LocalSet(FT)]);
-            }
-            asm.body.extend([W::LocalGet(CNT), W::I32Const(LOOP_LIMIT), W::I32LtU, W::BrIf(depth)]);
-            asm.fdelta = 0;
-            asm.emit_exit(start, 0);
-            asm.fdelta = fdelta;
-        };
-        match term {
-            Term::Jcc(cc, _, next) => {
-                asm.push_cond(cc);
-                asm.body.push(W::If(BlockType::Empty));
-                back(&mut asm, 1);
-                asm.body.push(W::End);
-                asm.emit_exit(next, count);
-            }
-            _ => back(&mut asm, 0),
-        }
-        asm.body.push(W::End);
-        asm.body.push(W::Unreachable);
-        return Some(finish(asm));
-    }
-    match term {
-        Term::ExitAt(a) => asm.emit_exit(a, count),
-        Term::Jmp(t) => asm.emit_exit(t, count),
-        // 終わりの命令も 1 つと数える
-        Term::Flow(i) => stack::emit_term(&mut asm, &i, count + 1),
-        Term::Jcc(cc, t, next) => {
-            asm.fpu_sync();
-            asm.cpu();
-            asm.body.push(W::I64Const(t as i64));
-            asm.body.push(W::I64Const(next as i64));
-            asm.push_cond(cc);
-            asm.body.push(W::Select);
-            asm.body.push(W::I64Store(MemArg { offset: asm.off.rip, align: 3, memory_index: 0 }));
-            asm.ret_count(count);
-            asm.body.push(W::Return);
-        }
-    }
-    Some(finish(asm))
-}
-
 fn finish(asm: Asm) -> Compiled {
-    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (3, ValType::I32)], body: asm.body }
+    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (4, ValType::I32)], body: asm.body }
 }
 
 fn is_jcc(i: &Instruction) -> bool {
