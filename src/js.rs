@@ -51,6 +51,28 @@ impl JsVst {
         if t == 0 { 0.0 } else { e.jit_insns as f64 / t as f64 }
     }
 
+    /// jitMisses のために数え始める（調査用。数えると遅くなる）
+    #[wasm_bindgen(js_name = countJitMisses)]
+    pub fn count_jit_misses(&mut self) {
+        match &mut self.0 {
+            Plugin::X86(v) => v.emu.jit.count_miss = true,
+            Plugin::X64(v) => v.emu.jit.count_miss = true,
+        }
+    }
+
+    /// JIT が有効なのにインタープリターで動かしたブロックの先頭の命令（多い順に "回数 命令" の行。調査用。先に countJitMisses）
+    #[wasm_bindgen(js_name = jitMisses)]
+    pub fn jit_misses(&self) -> String {
+        let e = match &self.0 {
+            Plugin::X86(v) => &v.emu,
+            Plugin::X64(v) => &v.emu,
+        };
+        let mut v: Vec<_> = e.jit_miss.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        v.iter().take(30).map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join("
+")
+    }
+
     /// JIT を使うか（ありとなしで出力を比べるため。既定は使う）
     #[wasm_bindgen(js_name = setJit)]
     pub fn set_jit(&mut self, on: bool) {

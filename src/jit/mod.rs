@@ -50,6 +50,8 @@ pub struct Jit {
     /// 変換を始める回数
     threshold: u32,
     pub on: bool,
+    /// インタープリターで動かした命令を jit_miss に数えるか（調査用。数えると遅くなる）
+    pub count_miss: bool,
 }
 
 impl Default for Jit {
@@ -61,6 +63,7 @@ impl Default for Jit {
             hits: Default::default(),
             threshold,
             on: std::env::var("VSTBRIDGE_NOJIT").is_err(),
+            count_miss: false,
         }
     }
 }

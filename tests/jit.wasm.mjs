@@ -5,7 +5,7 @@ import { JsVst } from '../pkg/vstbridge.js'
 
 const paths = process.argv.slice(2)
 if (!paths.length) { console.log('skip: DLL のパスが無い'); process.exit(0) }
-const secs = Number(process.env.SECS ?? 2)
+const secs = Number(process.env.SECS ?? 2)  // MISSES=1 で、JIT で動かせなかった命令も表示する
 const n = 128
 
 /** 決まった雑音（同じ種から同じ列） */
@@ -18,6 +18,7 @@ function noise(seed) {
 function run(dll, jit) {
   const v = new JsVst(dll)
   v.setJit(jit)
+  if (jit && process.env.MISSES) v.countJitMisses()
   const ins = Math.max(1, v.numInputs), params = v.numParams
   const rnd = noise(1), knob = noise(2)
   const blocks = Math.floor((secs * 48000) / n)
@@ -28,7 +29,7 @@ function run(dll, jit) {
     const input = Array.from({ length: ins }, () => Float32Array.from({ length: n }, () => rnd() * 0.5))
     for (const ch of v.process(input, n)) out.push(new Uint32Array(ch.buffer.slice(0)))
   }
-  return { out, ms: performance.now() - t0, coverage: v.jitCoverage() }
+  return { out, ms: performance.now() - t0, coverage: v.jitCoverage(), misses: jit ? v.jitMisses() : '' }
 }
 
 let failed = 0
@@ -41,6 +42,8 @@ for (const path of paths) {
     for (let k = 0; k < a.out.length && diff < 0; k++) for (let j = 0; j < a.out[k].length; j++) if (a.out[k][j] !== b.out[k][j]) { diff = k; break }
     if (diff >= 0) failed++
     console.log(`${diff < 0 ? 'ok  ' : 'NG  '}${name}: なし ${a.ms.toFixed(0)} ms、あり ${b.ms.toFixed(0)} ms（${(a.ms / b.ms).toFixed(2)} 倍）、JIT の命令 ${(b.coverage * 100).toFixed(0)}%${diff >= 0 ? `、最初の違い ${diff} 番目の塊` : ''}`)
+    // MISSES=1 なら、JIT で動かせなかったブロックの先頭の命令を多い順に表示する
+    if (process.env.MISSES) console.log(b.misses.replace(/^/gm, '    '))
   } catch (e) {
     failed++
     console.log(`err ${name}: ${e.message ?? e}`)

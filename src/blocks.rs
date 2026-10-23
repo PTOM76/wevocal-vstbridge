@@ -52,6 +52,15 @@ fn slot(rip: u64) -> usize {
 }
 
 impl Emu {
+    /// rip の命令を jit_miss に数える（JIT で動かせなかった理由を調べるため）。bail は JIT の途中で遅い道に回った命令
+    fn count_miss(&mut self, bail: bool) {
+        let rip = self.cpu.rip;
+        let Ok(bytes) = self.mem.fetch(rip, 16) else { return };
+        let insn = Decoder::with_ip(self.bits(), bytes, rip, DecoderOptions::NONE).decode();
+        let key = format!("{}{insn}", if bail { "bail " } else { "" });
+        *self.jit_miss.entry(key).or_insert(0) += 1;
+    }
+
     /// rip から始まるブロック（code の始まり, 命令数）。なければ作る
     #[inline(always)]
     fn block_at(&mut self, rip: u64) -> R<(u32, u32)> {
@@ -137,6 +146,9 @@ impl Emu {
                     if self.cpu.jit_bail != 0 {
                         // メモリの遅い道。その 1 命令だけインタープリターで進める
                         self.cpu.jit_bail = 0;
+                        if self.jit.count_miss {
+                            self.count_miss(true);
+                        }
                         self.step()?;
                         self.cpu.steps += 1;
                     }
@@ -147,6 +159,10 @@ impl Emu {
                 }
             }
             let (start, len) = self.block_at(rip)?;
+            #[cfg(target_arch = "wasm32")]
+            if self.jit.on && self.jit.count_miss {
+                self.count_miss(false);
+            }
             let first = start as usize;
             let last = (start + len) as usize - 1;
             // 分岐しなければブロックの次へ進む（分岐の命令は中で rip を書き換える）
