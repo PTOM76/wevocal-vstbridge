@@ -371,7 +371,7 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             asm.body.extend([W::LocalGet(FT), W::I32Const(fdelta), W::I32Add, W::I32Const(7), W::I32And, W::LocalSet(FT)]);
             asm.fdelta = 0;
             asm.cpu();
-            asm.body.extend([W::I32Const(k as i32), W::I32Const(crate::jit::x87_helper as usize as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
+            asm.body.extend([W::I32Const(k as i32), W::I32Const(crate::jit::x87_helper as *const () as usize as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
             asm.cpu();
             asm.body.extend([W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }), W::LocalSet(FT)]);
         }

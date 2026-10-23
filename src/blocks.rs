@@ -52,6 +52,7 @@ fn slot(rip: u64) -> usize {
 }
 
 impl Emu {
+    #[cfg(target_arch = "wasm32")]
     /// rip の命令を jit_miss に数える（JIT で動かせなかった理由を調べるため）。bail は JIT の途中で遅い道に回った命令
     fn count_miss(&mut self, bail: bool) {
         let rip = self.cpu.rip;
