@@ -59,10 +59,13 @@ fn offs() -> Off {
     }
 }
 
-/// レジスタ（汎用）の番号と大きさ。AH/BH などの上位バイトは None（対応しない）
+/// 上位バイトのレジスタ（AH、CH、DH、BH）の番号の始まり。HI + n は、レジスタ n のビット 8〜15
+const HI: usize = 16;
+
+/// レジスタ（汎用）の番号と大きさ。AH/BH などの上位バイトは HI + 番号（大きさ 1）
 fn gpr(r: Register) -> Option<(usize, usize)> {
-    if matches!(r, Register::AH | Register::CH | Register::DH | Register::BH) {
-        return None;
+    if let Some(n) = [Register::AH, Register::CH, Register::DH, Register::BH].iter().position(|&h| h == r) {
+        return Some((HI + n, 1));
     }
     let full = r.full_register();
     if !(Register::RAX..=Register::R15).contains(&full) {
@@ -114,13 +117,23 @@ impl Asm {
     /// レジスタ idx の 64 ビットを積む
     fn load_reg(&mut self, idx: usize) {
         self.cpu();
-        self.body.push(W::I64Load(MemArg { offset: off_reg(idx), align: 3, memory_index: 0 }));
+        self.body.push(W::I64Load(MemArg { offset: off_reg(idx % HI), align: 3, memory_index: 0 }));
+        if idx >= HI {
+            self.body.extend([W::I64Const(8), W::I64ShrU]);
+        }
     }
     /// レジスタ idx に、スタックの上の i64 を size バイトとして書く（x86-64 の決まり）
     fn store_reg(&mut self, idx: usize, size: usize) {
         // 値はスタックにある。いったん R に退避してから組み立てる
         self.body.push(W::LocalSet(R));
         self.cpu();
+        if idx >= HI {
+            // ビット 8〜15 だけを書き換える
+            self.load_reg(idx % HI);
+            self.body.extend([W::I64Const(!0xff00), W::I64And, W::LocalGet(R), W::I64Const(0xff), W::I64And, W::I64Const(8), W::I64Shl, W::I64Or]);
+            self.body.push(W::I64Store(MemArg { offset: off_reg(idx % HI), align: 3, memory_index: 0 }));
+            return;
+        }
         match size {
             8 => self.body.push(W::LocalGet(R)),
             4 => {
