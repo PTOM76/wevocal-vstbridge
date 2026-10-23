@@ -70,7 +70,7 @@ node tests/gain.wasm.mjs
 ### wevocal-lib に入れる
 
 ```bash
-./build-wasm.sh
+./build-wasm.sh    # PowerShell では .\build-wasm.ps1
 node scripts/export-to-lib.mjs ../wevocalsynth/wevocal-lib/
 ```
 
