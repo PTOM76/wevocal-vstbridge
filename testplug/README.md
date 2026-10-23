@@ -5,6 +5,7 @@
 - `vst2.h`: VST2 の形（構造体と関数の並び）を自分で書いたもの（SDK は使わない）
 - `gain.c`: 音量を変えるだけの VST2。外部の DLL を import しない（-nostdlib）
 - `sse.c`: SSE の型の変換（cvt）、並べ替え、movd、movq を使う VST2（JIT と、範囲外の変換の確かめ。tests/sse.rs、tests/jit.wasm.mjs）。ビルドは gain.c と同じで、名前だけ sse にする
+- `intops.c`: 引数が 1 つの mul と imul、32 と 64 ビットの div と idiv、switch の表（間接の jmp）、x87 の fsin、fcos、fpatan を使う VST2（JIT の確かめ。tests/jit.wasm.mjs）。ビルドは gain.c と同じで、名前だけ intops にする
 - `host.c`: ネイティブの Windows で gain.dll を動かすホスト（比べる基準）
 
 ## ビルド
