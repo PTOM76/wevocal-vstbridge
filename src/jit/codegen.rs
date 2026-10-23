@@ -661,8 +661,171 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
             }
             Some(())
         }
+        M::Shl | M::Shr | M::Sar => emit_shift(asm, i, insn_addr, count),
+        M::Imul if i.op_count() >= 2 => emit_imul(asm, i, insn_addr, count),
+        _ if is_setcc(m) => {
+            asm.push_cond(i.condition_code());
+            asm.body.push(W::I64ExtendI32U);
+            emit_store_dst(asm, i, 1, insn_addr, count)
+        }
+        // 条件が偽なら書かない（上位 32 ビットも消さない。インタープリターと同じ）。読みは条件によらず行う
+        _ if is_cmov(m) => {
+            let size = dst_size(i);
+            let src = operand(i, 1)?;
+            let (idx, _) = gpr(i.op_register(0))?;
+            asm.push_operand(&src, insn_addr, count);
+            asm.body.push(W::LocalSet(B));
+            asm.push_cond(i.condition_code());
+            asm.body.push(W::If(BlockType::Empty));
+            asm.body.push(W::LocalGet(B));
+            asm.store_reg(idx, size);
+            asm.body.push(W::End);
+            Some(())
+        }
         _ => emit_sse(asm, i, insn_addr, count),
     }
+}
+
+/// i64 の符号を size バイトから広げる
+fn sext_i64(b: &mut Vec<W<'static>>, size: usize) {
+    match size {
+        1 => b.push(W::I64Extend8S),
+        2 => b.push(W::I64Extend16S),
+        4 => b.push(W::I64Extend32S),
+        _ => {}
+    }
+}
+
+/// shl、shr、sar（即値か cl）。A = 値（マスク）、B = 数、R = 結果（マスク）。OF は変えない
+fn emit_shift(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Option<()> {
+    let m = i.mnemonic();
+    let size = dst_size(i);
+    let imm = shift_count(i, size);
+    if imm == Some(0) {
+        return Some(());
+    }
+    asm.push_operand(&operand(i, 0)?, insn_addr, count);
+    asm.body.push(W::LocalSet(A));
+    match imm {
+        Some(c) => asm.body.push(W::I64Const(c as i64)),
+        None => {
+            asm.push_operand(&operand(i, 1)?, insn_addr, count);
+            asm.body.push(W::I64Const(if size == 8 { 63 } else { 31 }));
+            asm.body.push(W::I64And);
+        }
+    }
+    asm.body.push(W::LocalSet(B));
+    // cl の数が 0 なら何もしない
+    asm.body.push(W::Block(BlockType::Empty));
+    if imm.is_none() {
+        asm.body.push(W::LocalGet(B));
+        asm.body.push(W::I64Eqz);
+        asm.body.push(W::BrIf(0));
+    }
+    // 押し出す前の値（sar は符号を広げる）
+    let src = |b: &mut Vec<W<'static>>| {
+        b.push(W::LocalGet(A));
+        if m == M::Sar {
+            sext_i64(b, size);
+        }
+    };
+    src(&mut asm.body);
+    asm.body.push(W::LocalGet(B));
+    asm.body.push(match m {
+        M::Shl => W::I64Shl,
+        M::Shr => W::I64ShrU,
+        _ => W::I64ShrS,
+    });
+    mask_i64(&mut asm.body, size);
+    asm.body.push(W::LocalSet(R));
+    // cf = 最後に押し出されたビット
+    if asm.flag_mask & FCF != 0 {
+        let cf = asm.off.cf;
+        asm.cpu();
+        src(&mut asm.body);
+        if m == M::Shl {
+            asm.body.push(W::I64Const(size as i64 * 8));
+            asm.body.push(W::LocalGet(B));
+            asm.body.push(W::I64Sub);
+            asm.body.push(W::I64ShrU);
+        } else {
+            asm.body.push(W::LocalGet(B));
+            asm.body.push(W::I64Const(1));
+            asm.body.push(W::I64Sub);
+            asm.body.push(if m == M::Shr { W::I64ShrU } else { W::I64ShrS });
+        }
+        asm.body.push(W::I32WrapI64);
+        asm.body.push(W::I32Const(1));
+        asm.body.push(W::I32And);
+        asm.body.push(W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 }));
+    }
+    asm.emit_zf();
+    asm.emit_sf(size);
+    asm.emit_pf();
+    asm.body.push(W::LocalGet(R));
+    emit_store_dst(asm, i, size, insn_addr, count)?;
+    asm.body.push(W::End);
+    Some(())
+}
+
+/// imul の 2 つと 3 つの引数の形。cf と of は「結果が size に収まらない」（sf、zf、pf は変えない。インタープリターと同じ）
+fn emit_imul(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Option<()> {
+    let size = dst_size(i);
+    let (x, y) = if i.op_count() == 3 { (1, 2) } else { (0, 1) };
+    asm.push_operand(&operand(i, x)?, insn_addr, count);
+    sext_i64(&mut asm.body, size);
+    asm.body.push(W::LocalSet(A));
+    asm.push_operand(&operand(i, y)?, insn_addr, count);
+    mask_i64(&mut asm.body, size);
+    sext_i64(&mut asm.body, size);
+    asm.body.push(W::LocalSet(B));
+    asm.body.push(W::LocalGet(A));
+    asm.body.push(W::LocalGet(B));
+    asm.body.push(W::I64Mul);
+    asm.body.push(W::LocalSet(R));
+    if asm.flag_mask & (FCF | FOF) != 0 {
+        // 収まらないか（i32 の 0/1 を GA に）
+        if size < 8 {
+            // 積は i64 に収まるので、size から符号を広げ直して比べる
+            asm.body.push(W::LocalGet(R));
+            sext_i64(&mut asm.body, size);
+            asm.body.push(W::LocalGet(R));
+            asm.body.push(W::I64Ne);
+        } else {
+            // a != 0 かつ（a == -1 なら b == MIN、そうでなければ r / a != b）。割り算の例外を避ける
+            asm.body.push(W::LocalGet(A));
+            asm.body.push(W::I64Eqz);
+            asm.body.push(W::If(BlockType::Result(ValType::I32)));
+            asm.body.push(W::I32Const(0));
+            asm.body.push(W::Else);
+            asm.body.push(W::LocalGet(A));
+            asm.body.push(W::I64Const(-1));
+            asm.body.push(W::I64Eq);
+            asm.body.push(W::If(BlockType::Result(ValType::I32)));
+            asm.body.push(W::LocalGet(B));
+            asm.body.push(W::I64Const(i64::MIN));
+            asm.body.push(W::I64Eq);
+            asm.body.push(W::Else);
+            asm.body.push(W::LocalGet(R));
+            asm.body.push(W::LocalGet(A));
+            asm.body.push(W::I64DivS);
+            asm.body.push(W::LocalGet(B));
+            asm.body.push(W::I64Ne);
+            asm.body.push(W::End);
+            asm.body.push(W::End);
+        }
+        asm.body.push(W::LocalSet(GA));
+        for (bit, off) in [(FCF, asm.off.cf), (FOF, asm.off.of)] {
+            if asm.flag_mask & bit != 0 {
+                asm.cpu();
+                asm.body.push(W::LocalGet(GA));
+                asm.body.push(W::I32Store8(MemArg { offset: off, align: 0, memory_index: 0 }));
+            }
+        }
+    }
+    asm.body.push(W::LocalGet(R));
+    mask_i64(&mut asm.body, size);
+    emit_store_dst(asm, i, size, insn_addr, count)
 }
 
 fn src_size(i: &Instruction) -> usize {
@@ -690,8 +853,94 @@ enum Term {
     Jcc(ConditionCode, u64, u64),
 }
 
-/// その命令が JIT で変換できるか（できるなら書き込むフラグのビット）。できないなら None。
-/// 本体の命令にフラグを読むもの（adc、setcc など）は無いので、読みは考えない
+/// 条件コードが読むフラグ
+fn cond_reads(c: ConditionCode) -> u8 {
+    use ConditionCode as C;
+    match c {
+        C::o | C::no => FOF,
+        C::b | C::ae => FCF,
+        C::e | C::ne => FZF,
+        C::be | C::a => FCF | FZF,
+        C::s | C::ns => FSF,
+        C::p | C::np => FPF,
+        C::l | C::ge => FSF | FOF,
+        C::le | C::g => FZF | FSF | FOF,
+        C::None => 0,
+    }
+}
+
+fn is_cmov(m: M) -> bool {
+    use M::*;
+    matches!(m, Cmovo | Cmovno | Cmovb | Cmovae | Cmove | Cmovne | Cmovbe | Cmova | Cmovs | Cmovns | Cmovp | Cmovnp | Cmovl | Cmovge | Cmovle | Cmovg)
+}
+fn is_setcc(m: M) -> bool {
+    use M::*;
+    matches!(m, Seto | Setno | Setb | Setae | Sete | Setne | Setbe | Seta | Sets | Setns | Setp | Setnp | Setl | Setge | Setle | Setg)
+}
+
+/// 整数の引数がすべて JIT で扱える形か（ah などの上位バイト、rip 相対、fs/gs は扱わない）
+fn int_operands_ok(i: &Instruction) -> bool {
+    (0..i.op_count()).all(|n| operand(i, n).is_some())
+}
+
+/// シフトの数（即値なら Some(数)、cl なら None）。大きさで切り詰めた値
+fn shift_count(i: &Instruction, size: usize) -> Option<u64> {
+    let m = if size == 8 { 63 } else { 31 };
+    match operand(i, 1)? {
+        Opnd::Imm(v) => Some(v & m),
+        _ => None,
+    }
+}
+
+/// フラグの書き読み。kill は必ず書くもの（前の値を消す）、emit は書くことがあるもの、read は読むもの
+struct Rw {
+    kill: u8,
+    emit: u8,
+    read: u8,
+}
+const fn rw(kill: u8) -> Rw {
+    Rw { kill, emit: kill, read: 0 }
+}
+
+/// その命令が JIT で変換できるか（できるならフラグの書き読み）。できないなら None
+fn insn_rw(i: &Instruction) -> Option<Rw> {
+    let m = i.mnemonic();
+    if is_cmov(m) || is_setcc(m) {
+        if !int_operands_ok(i) || (is_cmov(m) && i.op_kind(0) != OpKind::Register) {
+            return None;
+        }
+        return Some(Rw { kill: 0, emit: 0, read: cond_reads(i.condition_code()) });
+    }
+    use M::*;
+    Some(match m {
+        // シフト（OF は変えない。インタープリターと同じ）。数が 0 なら何もしない
+        Shl | Shr | Sar => {
+            if !int_operands_ok(i) {
+                return None;
+            }
+            let size = dst_size(i);
+            let szpc = FCF | FZF | FSF | FPF;
+            match shift_count(i, size) {
+                Some(0) => rw(0),
+                // 大きさを超える数（8、16 ビットだけ起きる）はインタープリター
+                Some(c) if c >= size as u64 * 8 => return None,
+                Some(_) => rw(szpc),
+                // cl の数: 0 なら書かないので、前の値は消さない。8、16 ビットは大きさを超えうるのでインタープリター
+                None if size >= 4 && i.op_register(1) == Register::CL => Rw { kill: 0, emit: szpc, read: 0 },
+                None => return None,
+            }
+        }
+        Imul if i.op_count() >= 2 => {
+            if !int_operands_ok(i) {
+                return None;
+            }
+            rw(FCF | FOF)
+        }
+        _ => rw(insn_flags(i)?),
+    })
+}
+
+/// 書き込むフラグのビット（読みのない命令）。できないなら None
 fn insn_flags(i: &Instruction) -> Option<u8> {
     use M::*;
     Some(match i.mnemonic() {
@@ -742,7 +991,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
             }
             break;
         }
-        if insn_flags(&insn).is_none() {
+        if insn_rw(&insn).is_none() {
             if insns.is_empty() {
                 return None;
             }
@@ -756,14 +1005,14 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
             break;
         }
     }
-    // フラグの生死（後ろ向き。ブロック末では全フラグ生存とみなす。本体にフラグを読む命令は無いので、後で上書きされるフラグは不要）
+    // フラグの生死（後ろ向き。ブロック末では全フラグ生存とみなす）。読まれる前に必ず上書きされるフラグは作らない
     let n = insns.len();
     let mut live = vec![0u8; n];
-    let mut seen = 0u8;
+    let mut need = FALL;
     for k in (0..n).rev() {
-        let w = insn_flags(&insns[k]).unwrap_or(0);
-        live[k] = w & !seen;
-        seen |= w;
+        let f = insn_rw(&insns[k])?;
+        live[k] = f.emit & need;
+        need = (need & !f.kill) | f.read;
     }
     // 第 2 パス: 生成
     let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), bits, flag_mask: FALL };

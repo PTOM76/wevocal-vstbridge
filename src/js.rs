@@ -51,6 +51,17 @@ impl JsVst {
         if t == 0 { 0.0 } else { e.jit_insns as f64 / t as f64 }
     }
 
+    /// JIT を使うか（ありとなしで出力を比べるため。既定は使う）
+    #[wasm_bindgen(js_name = setJit)]
+    pub fn set_jit(&mut self, on: bool) {
+        let e = match &mut self.0 {
+            Plugin::X86(v) => &mut v.emu,
+            Plugin::X64(v) => &mut v.emu,
+        };
+        e.jit.on = on;
+        e.jit.clear();
+    }
+
     pub fn name(&mut self) -> Result<String, JsError> {
         match &mut self.0 {
             Plugin::X64(v) => v.name(),
