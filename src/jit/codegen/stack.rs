@@ -81,7 +81,7 @@ impl Asm {
         self.cpu();
         self.body.push(W::LocalGet(local));
         self.body.push(W::I64Store(MemArg { offset: self.off.rip, align: 3, memory_index: 0 }));
-        self.body.push(W::I32Const(count as i32));
+        self.ret_count(count);
         self.body.push(W::Return);
     }
 }

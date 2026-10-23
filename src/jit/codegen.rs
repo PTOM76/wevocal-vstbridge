@@ -21,6 +21,9 @@ const D0: u32 = 8; // f64 作業用
 const D1: u32 = 9;
 const FT: u32 = 10; // i32 ブロックの頭の x87 のスタックの先頭（fpu_top）
 const T0: u32 = 11; // i32 作業用
+const CNT: u32 = 12; // i32 自分へ戻るループで、前の周までに実行した命令の数
+/// ループを回す命令の数の上限（これを超えたら抜けて、命令数の見張りに戻す）
+const LOOP_LIMIT: i32 = 100_000;
 
 mod stack;
 mod x87;
@@ -208,13 +211,19 @@ impl Asm {
         self.body.push(W::I32Add);
         self.body.push(W::I32Store(MemArg { offset: depth, align: 2, memory_index: 0 }));
     }
+    /// 実行した命令の数（この周の count と、前の周までの CNT）を積む
+    fn ret_count(&mut self, count: u32) {
+        self.body.push(W::I32Const(count as i32));
+        self.body.push(W::LocalGet(CNT));
+        self.body.push(W::I32Add);
+    }
     /// rip を v にして、count を積んで返す
     fn emit_exit(&mut self, v: u64, count: u32) {
         self.fpu_sync();
         self.cpu();
         self.body.push(W::I64Const(v as i64));
         self.body.push(W::I64Store(MemArg { offset: self.off.rip, align: 3, memory_index: 0 }));
-        self.body.push(W::I32Const(count as i32));
+        self.ret_count(count);
         self.body.push(W::Return);
     }
     /// rip を命令の番地にし、bail=1 にして count を返す
@@ -227,7 +236,7 @@ impl Asm {
         self.cpu();
         self.body.push(W::I32Const(1));
         self.body.push(W::I32Store(MemArg { offset: self.off.bail, align: 2, memory_index: 0 }));
-        self.body.push(W::I32Const(count as i32));
+        self.ret_count(count);
         self.body.push(W::Return);
     }
     /// 引数の値（i64、size で 0 拡張）を積む
@@ -1067,6 +1076,11 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         asm.body.push(W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }));
         asm.body.push(W::LocalSet(FT));
     }
+    // 終わりの分岐が自分の頭へ戻るなら、wasm の loop で回す（Rust に戻らずに次の周へ）
+    let looped = n > 0 && matches!(term, Term::Jcc(_, t, _) | Term::Jmp(t) if t == start);
+    if looped {
+        asm.body.push(W::Loop(BlockType::Empty));
+    }
     for (k, insn) in insns.iter().enumerate() {
         asm.flag_mask = live[k];
         if emit_insn(&mut asm, insn, insn.ip(), k as u32).is_none() {
@@ -1075,6 +1089,34 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         }
     }
     let count = n as u32;
+    if looped {
+        // 戻るとき: x87 の先頭を書き戻して FT を進め、命令の数を足して、上限までなら頭へ。上限なら頭を rip にして抜ける
+        let back = |asm: &mut Asm, depth: u32| {
+            asm.body.extend([W::LocalGet(CNT), W::I32Const(count as i32), W::I32Add, W::LocalSet(CNT)]);
+            let fdelta = asm.fdelta;
+            if asm.fpu {
+                asm.fpu_sync();
+                asm.body.extend([W::LocalGet(FT), W::I32Const(fdelta), W::I32Add, W::I32Const(7), W::I32And, W::LocalSet(FT)]);
+            }
+            asm.body.extend([W::LocalGet(CNT), W::I32Const(LOOP_LIMIT), W::I32LtU, W::BrIf(depth)]);
+            asm.fdelta = 0;
+            asm.emit_exit(start, 0);
+            asm.fdelta = fdelta;
+        };
+        match term {
+            Term::Jcc(cc, _, next) => {
+                asm.push_cond(cc);
+                asm.body.push(W::If(BlockType::Empty));
+                back(&mut asm, 1);
+                asm.body.push(W::End);
+                asm.emit_exit(next, count);
+            }
+            _ => back(&mut asm, 0),
+        }
+        asm.body.push(W::End);
+        asm.body.push(W::Unreachable);
+        return Some(finish(asm));
+    }
     match term {
         Term::ExitAt(a) => asm.emit_exit(a, count),
         Term::Jmp(t) => asm.emit_exit(t, count),
@@ -1088,7 +1130,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
             asm.push_cond(cc);
             asm.body.push(W::Select);
             asm.body.push(W::I64Store(MemArg { offset: asm.off.rip, align: 3, memory_index: 0 }));
-            asm.body.push(W::I32Const(count as i32));
+            asm.ret_count(count);
             asm.body.push(W::Return);
         }
     }
@@ -1096,7 +1138,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
 }
 
 fn finish(asm: Asm) -> Compiled {
-    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (2, ValType::I32)], body: asm.body }
+    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (3, ValType::I32)], body: asm.body }
 }
 
 fn is_jcc(i: &Instruction) -> bool {
