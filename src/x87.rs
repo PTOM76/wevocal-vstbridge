@@ -115,58 +115,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
             let v = cpu.fround(cpu.st(0));
             cpu.set_st(0, v);
         }
-        // 超越関数（st(0) を書き換える）
-        M::Fsin => {
-            let v = cpu.st(0).sin();
-            cpu.set_st(0, v);
-        }
-        M::Fcos => {
-            let v = cpu.st(0).cos();
-            cpu.set_st(0, v);
-        }
-        M::Fsincos => {
-            let v = cpu.st(0);
-            cpu.set_st(0, v.sin());
-            cpu.fpush(v.cos());
-        }
-        M::Fptan => {
-            let v = cpu.st(0).tan();
-            cpu.set_st(0, v);
-            cpu.fpush(1.0);
-        }
-        M::Fpatan => {
-            // atan(st(1) / st(0)) を st(1) に入れて pop
-            let r = cpu.st(1).atan2(cpu.st(0));
-            cpu.fpop();
-            cpu.set_st(0, r);
-        }
-        // fyl2x: st(1) * log2(st(0)) を st(1) に入れて pop。fyl2xp1 は log2(st(0)+1)
-        M::Fyl2x => {
-            let r = cpu.st(1) * cpu.st(0).log2();
-            cpu.fpop();
-            cpu.set_st(0, r);
-        }
-        M::Fyl2xp1 => {
-            let r = cpu.st(1) * (cpu.st(0) + 1.0).log2();
-            cpu.fpop();
-            cpu.set_st(0, r);
-        }
-        // f2xm1: 2^st(0) - 1
-        M::F2xm1 => {
-            let v = cpu.st(0).exp2() - 1.0;
-            cpu.set_st(0, v);
-        }
-        // fscale: st(0) * 2^trunc(st(1))
-        M::Fscale => {
-            let v = cpu.st(0) * (cpu.st(1).trunc()).exp2();
-            cpu.set_st(0, v);
-        }
-        // fprem、fprem1: st(0) を st(1) で割った余り
-        M::Fprem | M::Fprem1 => {
-            let r = cpu.st(0) % cpu.st(1);
-            cpu.set_st(0, r);
-            cpu.fpu_c = (false, false, false, false); // C2=0（割り切れた扱い）
-        }
+        M::Fsin | M::Fcos | M::Fsincos | M::Fptan | M::Fpatan | M::Fyl2x | M::Fyl2xp1 | M::F2xm1 | M::Fscale | M::Fprem | M::Fprem1 => transcend(cpu, m),
         // 定数の読み込み
         M::Fldpi => cpu.fpush(std::f64::consts::PI),
         M::Fldl2e => cpu.fpush(std::f64::consts::LOG2_E),
@@ -284,4 +233,66 @@ fn arith(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<()> {
         cpu.fpop();
     }
     Ok(())
+}
+
+/// JIT から呼ぶ、st だけを相手にする命令（超越関数など）。JIT の遅い道は TRANSCEND の添字で呼ぶ
+pub const TRANSCEND: [M; 11] = [M::Fsin, M::Fcos, M::Fsincos, M::Fptan, M::Fpatan, M::Fyl2x, M::Fyl2xp1, M::F2xm1, M::Fscale, M::Fprem, M::Fprem1];
+
+/// 超越関数などを cpu の st に行う（exec と JIT の遅い道で共通）
+pub fn transcend(cpu: &mut Cpu, m: M) {
+    match m {
+        // 超越関数（st(0) を書き換える）
+        M::Fsin => {
+            let v = cpu.st(0).sin();
+            cpu.set_st(0, v);
+        }
+        M::Fcos => {
+            let v = cpu.st(0).cos();
+            cpu.set_st(0, v);
+        }
+        M::Fsincos => {
+            let v = cpu.st(0);
+            cpu.set_st(0, v.sin());
+            cpu.fpush(v.cos());
+        }
+        M::Fptan => {
+            let v = cpu.st(0).tan();
+            cpu.set_st(0, v);
+            cpu.fpush(1.0);
+        }
+        M::Fpatan => {
+            // atan(st(1) / st(0)) を st(1) に入れて pop
+            let r = cpu.st(1).atan2(cpu.st(0));
+            cpu.fpop();
+            cpu.set_st(0, r);
+        }
+        // fyl2x: st(1) * log2(st(0)) を st(1) に入れて pop。fyl2xp1 は log2(st(0)+1)
+        M::Fyl2x => {
+            let r = cpu.st(1) * cpu.st(0).log2();
+            cpu.fpop();
+            cpu.set_st(0, r);
+        }
+        M::Fyl2xp1 => {
+            let r = cpu.st(1) * (cpu.st(0) + 1.0).log2();
+            cpu.fpop();
+            cpu.set_st(0, r);
+        }
+        // f2xm1: 2^st(0) - 1
+        M::F2xm1 => {
+            let v = cpu.st(0).exp2() - 1.0;
+            cpu.set_st(0, v);
+        }
+        // fscale: st(0) * 2^trunc(st(1))
+        M::Fscale => {
+            let v = cpu.st(0) * (cpu.st(1).trunc()).exp2();
+            cpu.set_st(0, v);
+        }
+        // fprem、fprem1: st(0) を st(1) で割った余り
+        M::Fprem | M::Fprem1 => {
+            let r = cpu.st(0) % cpu.st(1);
+            cpu.set_st(0, r);
+            cpu.fpu_c = (false, false, false, false); // C2=0（割り切れた扱い）
+        }
+        _ => {}
+    }
 }

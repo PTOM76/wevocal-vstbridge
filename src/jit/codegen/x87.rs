@@ -7,7 +7,7 @@ pub(super) fn is_x87(m: M) -> bool {
     use M::*;
     matches!(
         m,
-        Fld | Fild | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fst | Fstp | Fist | Fistp | Fisttp | Fadd | Fsub | Fsubr | Fmul | Fdiv | Fdivr | Faddp | Fsubp | Fsubrp | Fmulp | Fdivp | Fdivrp | Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr | Fchs | Fabs | Fsqrt | Frndint | Fxch | Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp | Fcomi | Fcomip | Fucomi | Fucomip | Fnstsw | Fnstcw | Fldcw | Fnclex | Wait
+        Fld | Fild | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fst | Fstp | Fist | Fistp | Fisttp | Fadd | Fsub | Fsubr | Fmul | Fdiv | Fdivr | Faddp | Fsubp | Fsubrp | Fmulp | Fdivp | Fdivrp | Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr | Fchs | Fabs | Fsqrt | Frndint | Fxch | Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp | Fcomi | Fcomip | Fucomi | Fucomip | Fnstsw | Fnstcw | Fldcw | Fnclex | Wait | Fsin | Fcos | Fsincos | Fptan | Fpatan | Fyl2x | Fyl2xp1 | F2xm1 | Fscale | Fprem | Fprem1
     )
 }
 
@@ -363,6 +363,18 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             }
         }
         M::Fnclex | M::Wait => {}
+        // 超越関数などは Rust（インタープリターと同じ計算）を呼ぶ。先頭とずれを Cpu に書き戻してから呼び、先頭を読み直す
+        _ if crate::x87::TRANSCEND.contains(&m) => {
+            let k = crate::x87::TRANSCEND.iter().position(|&t| t == m)?;
+            let fdelta = asm.fdelta;
+            asm.fpu_sync();
+            asm.body.extend([W::LocalGet(FT), W::I32Const(fdelta), W::I32Add, W::I32Const(7), W::I32And, W::LocalSet(FT)]);
+            asm.fdelta = 0;
+            asm.cpu();
+            asm.body.extend([W::I32Const(k as i32), W::I32Const(crate::jit::x87_helper as usize as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
+            asm.cpu();
+            asm.body.extend([W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }), W::LocalSet(FT)]);
+        }
         _ => return None,
     }
     Some(())

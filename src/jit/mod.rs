@@ -10,6 +10,8 @@ pub fn module(locals: &[(u32, ValType)], body: &[W]) -> Vec<u8> {
     let mut m = Module::new();
     let mut types = TypeSection::new();
     types.ty().function([ValType::I32], [ValType::I32]);
+    // 1: 遅い道の Rust の関数（cpu, 番号）。表の添字で call_indirect する
+    types.ty().function([ValType::I32, ValType::I32], []);
     m.section(&types);
     let mut imports = ImportSection::new();
     imports.import("env", "memory", EntityType::Memory(MemoryType { minimum: 1, maximum: None, memory64: false, shared: false, page_size_log2: None }));
@@ -30,6 +32,13 @@ pub fn module(locals: &[(u32, ValType)], body: &[W]) -> Vec<u8> {
     code.function(&f);
     m.section(&code);
     m.finish()
+}
+
+/// JIT の遅い道: x87 の超越関数など（k は x87::TRANSCEND の添字）。生成したコードが表の添字で呼ぶ
+pub extern "C" fn x87_helper(cpu: u32, k: u32) {
+    // SAFETY: 生成したコードは、動いている Emu の Cpu の番地を渡す
+    let cpu = unsafe { &mut *(cpu as usize as *mut crate::cpu::Cpu) };
+    crate::x87::transcend(cpu, crate::x87::TRANSCEND[k as usize]);
 }
 
 /// つなぎ方の確かめ: 引数に 42 を足して返す関数を作って呼ぶ
