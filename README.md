@@ -67,6 +67,15 @@ node tests/gain.wasm.mjs
 
 `pkg/` と `pkg-web/` は生成物（リポジトリに含めない）。
 
+### wevocal-lib に入れる
+
+```bash
+./build-wasm.sh
+node scripts/export-to-lib.mjs ../wevocalsynth/wevocal-lib/
+```
+
+wevocal-lib の `web/src/plugins/vst/` に `vstbridge.js`、`vstbridge.d.ts`、`vstbridge_bg.wasm`、`workletGlue.ts`（AudioWorklet 用に加工したグルー）を書き出す。同じフォルダーの `bridge.ts`、`gui.ts`、`index.ts` は lib 側で書くファイルなので上書きしない。書き出したあとは wevocal-lib でコミットし、Synth と Studio の submodule を更新する。
+
 ### ブラウザ（実機）で確かめる
 
 ```bash
