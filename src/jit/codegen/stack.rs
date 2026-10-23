@@ -23,6 +23,7 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
     let ok = match i.mnemonic() {
         M::Push => i.op_count() == 1 && op0_ok(i),
         M::Pop => i.op_count() == 1 && i.op_kind(0) == OpKind::Register && op0_ok(i),
+        M::Leave => i.op_count() == 0,
         _ => false,
     };
     ok.then_some(Rw { kill: 0, emit: 0, read: 0 })
@@ -94,6 +95,17 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             asm.push_operand(&operand(i, 0)?, insn_addr, count);
             asm.body.push(W::LocalSet(B));
             asm.push_b(w, insn_addr, count);
+        }
+        // rsp = rbp、そこから rbp を取り出す
+        M::Leave => {
+            asm.load_reg(5);
+            asm.body.extend([W::LocalTee(A), W::I32WrapI64, W::LocalSet(GA)]);
+            asm.resolve_ptr(w, insn_addr, count);
+            asm.body.extend([W::LocalGet(HP), load_op(w), W::LocalSet(B)]);
+            asm.body.extend([W::LocalGet(A), W::I64Const(w as i64), W::I64Add, W::LocalSet(A)]);
+            asm.set_rsp_from(A);
+            asm.body.push(W::LocalGet(B));
+            asm.store_reg(5, w);
         }
         _ => {
             let (idx, _) = gpr(i.op_register(0))?;

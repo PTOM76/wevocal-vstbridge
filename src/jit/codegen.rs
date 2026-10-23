@@ -26,6 +26,7 @@ const PC: u32 = 13; // i32 次に動かす、まとめたブロックの番号
 /// ループを回す命令の数の上限（これを超えたら抜けて、命令数の見張りに戻す）
 const LOOP_LIMIT: i32 = 100_000;
 
+mod int_more;
 mod region;
 mod sse_more;
 mod stack;
@@ -752,7 +753,8 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
         }
         // 条件が偽なら書かない（上位 32 ビットも消さない。インタープリターと同じ）。読みは条件によらず行う
         _ if x87::is_x87(m) => x87::emit(asm, i, insn_addr, count),
-        M::Push | M::Pop => stack::emit(asm, i, insn_addr, count),
+        M::Push | M::Pop | M::Leave => stack::emit(asm, i, insn_addr, count),
+        M::Cdq | M::Cqo | M::Div | M::Idiv => int_more::emit(asm, i, insn_addr, count),
         _ if is_cmov(m) => {
             let size = dst_size(i);
             let src = operand(i, 1)?;
@@ -996,7 +998,7 @@ fn insn_rw(i: &Instruction) -> Option<Rw> {
     if x87::is_x87(m) {
         return x87::rw(i);
     }
-    if matches!(m, M::Push | M::Pop) {
+    if matches!(m, M::Push | M::Pop | M::Leave) {
         return stack::rw(i);
     }
     if is_cmov(m) || is_setcc(m) {
@@ -1024,6 +1026,7 @@ fn insn_rw(i: &Instruction) -> Option<Rw> {
                 None => return None,
             }
         }
+        Cdq | Cqo | Div | Idiv => return int_more::rw(i),
         Imul if i.op_count() >= 2 => {
             if !int_operands_ok(i) {
                 return None;

@@ -7,7 +7,7 @@ pub(super) fn is_x87(m: M) -> bool {
     use M::*;
     matches!(
         m,
-        Fld | Fild | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fst | Fstp | Fist | Fistp | Fisttp | Fadd | Fsub | Fsubr | Fmul | Fdiv | Fdivr | Faddp | Fsubp | Fsubrp | Fmulp | Fdivp | Fdivrp | Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr | Fchs | Fabs | Fsqrt | Frndint | Fxch | Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp | Fcomi | Fcomip | Fucomi | Fucomip | Fnstsw
+        Fld | Fild | Fld1 | Fldz | Fldpi | Fldl2e | Fldl2t | Fldlg2 | Fldln2 | Fst | Fstp | Fist | Fistp | Fisttp | Fadd | Fsub | Fsubr | Fmul | Fdiv | Fdivr | Faddp | Fsubp | Fsubrp | Fmulp | Fdivp | Fdivrp | Fiadd | Fisub | Fisubr | Fimul | Fidiv | Fidivr | Fchs | Fabs | Fsqrt | Frndint | Fxch | Fcom | Fcomp | Fcompp | Fucom | Fucomp | Fucompp | Ficom | Ficomp | Fcomi | Fcomip | Fucomi | Fucomip | Fnstsw | Fnstcw | Fldcw | Fnclex | Wait
     )
 }
 
@@ -31,7 +31,7 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
     let m = i.mnemonic();
     if mem_op(i) {
         let Opnd::Mem(_, size) = operand(i, 0)? else { return None };
-        let ok = if is_int(m) { matches!(size, 2 | 4 | 8) } else if m == M::Fnstsw { size == 2 } else { matches!(size, 4 | 8) };
+        let ok = if is_int(m) { matches!(size, 2 | 4 | 8) } else if matches!(m, M::Fnstsw | M::Fnstcw | M::Fldcw) { size == 2 } else { matches!(size, 4 | 8) };
         if !ok {
             return None;
         }
@@ -345,6 +345,24 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
                 asm.store_reg(0, 2);
             }
         }
+        // 制御ワード（丸めの設定。fround_d0 が読む）
+        M::Fnstcw | M::Fldcw => {
+            let Opnd::Mem(mo, _) = operand(i, 0)? else { return None };
+            let cw = MemArg { offset: offset_of!(Cpu, fpu_cw) as u64, align: 1, memory_index: 0 };
+            let at = MemArg { offset: 0, align: 0, memory_index: 0 };
+            asm.calc_addr(&mo);
+            if m == M::Fnstcw {
+                asm.resolve_ptr_w(2, insn_addr, count);
+                asm.body.push(W::LocalGet(HP));
+                asm.cpu();
+                asm.body.extend([W::I32Load16U(cw), W::I32Store16(at)]);
+            } else {
+                asm.resolve_ptr(2, insn_addr, count);
+                asm.cpu();
+                asm.body.extend([W::LocalGet(HP), W::I32Load16U(at), W::I32Store16(cw)]);
+            }
+        }
+        M::Fnclex | M::Wait => {}
         _ => return None,
     }
     Some(())
