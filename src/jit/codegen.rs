@@ -25,6 +25,7 @@ const CNT: u32 = 12; // i32 自分へ戻るループで、前の周までに実�
 /// ループを回す命令の数の上限（これを超えたら抜けて、命令数の見張りに戻す）
 const LOOP_LIMIT: i32 = 100_000;
 
+mod sse_more;
 mod stack;
 mod x87;
 
@@ -292,11 +293,15 @@ fn operand(i: &Instruction, n: u32) -> Option<Opnd> {
             Some(Opnd::Reg(idx, size))
         }
         OpKind::Memory => {
-            // rip 相対や特殊は後回し（対応しない）
             let base = i.memory_base();
             let index = i.memory_index();
-            if base == Register::RIP {
-                return None;
+            // rip 相対: iced が解いた番地（次の命令の番地 + 変位）をそのまま定数の番地にする（4GB 未満に置いてあるので収まる）
+            if base == Register::RIP || base == Register::EIP {
+                let a = i.memory_displacement64();
+                if index != Register::None || a > u32::MAX as u64 {
+                    return None;
+                }
+                return Some(Opnd::Mem(Mem { base: None, index: None, scale: 1, disp: a as u32 }, i.memory_size().size()));
             }
             match i.segment_prefix() {
                 Register::None | Register::DS | Register::SS | Register::ES | Register::CS => {}
@@ -988,7 +993,10 @@ fn insn_rw(i: &Instruction) -> Option<Rw> {
             }
             rw(FCF | FOF)
         }
-        _ => rw(insn_flags(i)?),
+        _ => match insn_flags(i) {
+            Some(f) => rw(f),
+            None => return sse_more::rw(i),
+        },
     })
 }
 
@@ -1479,6 +1487,6 @@ fn emit_sse(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Optio
             asm.body.push(W::I32Store8(MemArg { offset: of, align: 0, memory_index: 0 }));
             Some(())
         }
-        _ => None,
+        _ => sse_more::emit(asm, i, insn_addr, count),
     }
 }
