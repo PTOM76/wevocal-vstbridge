@@ -23,6 +23,8 @@ const FT: u32 = 10; // i32 ブロックの頭の x87 のスタックの先頭（
 const T0: u32 = 11; // i32 作業用
 const CNT: u32 = 12; // i32 前のブロック（周）までに実行した命令の数
 const PC: u32 = 13; // i32 次に動かす、まとめたブロックの番号
+const X0: u32 = 14; // i64 作業用（64 ビットの積の上位など）
+const X1: u32 = 15;
 /// ループを回す命令の数の上限（これを超えたら抜けて、命令数の見張りに戻す）
 const LOOP_LIMIT: i32 = 100_000;
 
@@ -1090,7 +1092,7 @@ fn insn_flags(i: &Instruction) -> Option<u8> {
 }
 
 fn finish(asm: Asm) -> Compiled {
-    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (4, ValType::I32)], body: asm.body }
+    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (4, ValType::I32), (2, ValType::I64)], body: asm.body }
 }
 
 fn is_jcc(i: &Instruction) -> bool {
