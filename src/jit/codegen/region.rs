@@ -1,5 +1,6 @@
 //! 分岐でつながる複数の基本ブロックを 1 つの wasm の関数にまとめる。ブロックの間は局所 PC と br_table で移り、Rust に戻らない。
-//! 直接の call は、呼ぶ先と戻り先もまとめに入れる。ret は、取り出した番地がまとめた戻り先なら、そこへ移る
+//! 直接の call は、呼ぶ先と戻り先もまとめに入れる。ret は、取り出した番地がまとめた戻り先なら、そこへ移る。
+//! 表を引く間接の jmp（switch）は、表の飛び先をまとめに入れ、実際の飛び先と比べて移る
 use super::*;
 
 /// まとめるブロックの数と命令の数の上限
@@ -10,6 +11,27 @@ const MAX_INSNS: usize = 1024;
 struct Block {
     insns: Vec<Instruction>,
     term: Term,
+    /// 終わりが表を引く間接の jmp なら、表から読んだ飛び先（候補。実際の飛び先とは実行のときに比べる）
+    table: Vec<u64>,
+}
+
+/// jmp [index*w + 表] の表から、飛び先の候補を読む（近くの番地で、命令として読めるものだけ。最大 64 個）
+fn table_targets(mem: &Memory, i: &Instruction) -> Vec<u64> {
+    let w = stack::width(i) as u64;
+    if i.flow_control() != FlowControl::IndirectBranch || i.op_kind(0) != OpKind::Memory || i.memory_base() != Register::None || i.memory_index() == Register::None || i.memory_index_scale() as u64 != w {
+        return Vec::new();
+    }
+    let mut v = Vec::new();
+    for k in 0..64 {
+        let Ok(t) = mem.read_n(i.memory_displacement64().wrapping_add(k * w), w as usize) else { break };
+        if t.abs_diff(i.ip()) > 0x10_0000 || mem.read_n(t, 1).is_err() {
+            break;
+        }
+        if !v.contains(&t) {
+            v.push(t);
+        }
+    }
+    v
 }
 
 /// start から 1 つの基本ブロックを読む。先頭の命令から変換できないときは None
@@ -58,7 +80,11 @@ fn scan(mem: &Memory, bits: u32, start: u64, max_block: usize) -> Option<Block> 
             break;
         }
     }
-    Some(Block { insns, term })
+    let table = match &term {
+        Term::Flow(i) => table_targets(mem, i),
+        _ => Vec::new(),
+    };
+    Some(Block { insns, term, table })
 }
 
 /// ブロックの命令（終わりの分岐は除く）を asm.body に書く。作れなければ None
@@ -107,7 +133,7 @@ fn direct_call(i: &Instruction) -> bool {
 }
 
 /// 終わりの call、ret。呼ぶ先や戻り先がまとめた中なら、Rust に戻らずに移る。ほかは stack::emit_term と同じ
-fn emit_flow(asm: &mut Asm, idx: &[u64], rets: &[u64], i: &Instruction, count: u32, depth: u32) {
+fn emit_flow(asm: &mut Asm, idx: &[u64], rets: &[u64], table: &[u64], i: &Instruction, count: u32, depth: u32) {
     let (w, at, before) = (stack::width(i), i.ip(), count - 1);
     if direct_call(i) && idx.contains(&i.near_branch_target()) {
         asm.body.extend([W::I64Const(i.next_ip() as i64), W::LocalSet(B)]);
@@ -122,6 +148,16 @@ fn emit_flow(asm: &mut Asm, idx: &[u64], rets: &[u64], i: &Instruction, count: u
             asm.body.push(W::End);
         }
         asm.emit_exit_dyn(B, count);
+    } else if table.iter().any(|t| idx.contains(t)) {
+        // 飛び先を R に読み（読めなければ中断）、まとめた中の候補と比べる
+        asm.push_operand(&operand(i, 0).expect("term_ok で確かめ済み"), at, before);
+        asm.body.push(W::LocalSet(R));
+        for &t in table.iter().filter(|t| idx.contains(t)) {
+            asm.body.extend([W::LocalGet(R), W::I64Const(t as i64), W::I64Eq, W::If(BlockType::Empty)]);
+            goto(asm, idx, t, count, depth + 1);
+            asm.body.push(W::End);
+        }
+        asm.emit_exit_dyn(R, count);
     } else {
         stack::emit_term(asm, i, count);
     }
@@ -145,7 +181,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
                 Term::Jmp(t) => vec![t],
                 Term::Jcc(_, t, n) => vec![t, n],
                 Term::Flow(i) if direct_call(&i) => vec![i.near_branch_target(), i.next_ip()],
-                _ => vec![],
+                _ => b.table.clone(),
             };
             for t in next {
                 if addrs.len() < MAX_BLOCKS && total < MAX_INSNS && !addrs.contains(&t) {
@@ -205,7 +241,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize) -> O
         match b.term {
             Term::ExitAt(a) | Term::Jmp(a) => goto(&mut asm, &idx, a, count, depth),
             // 終わりの命令も 1 つと数える
-            Term::Flow(i) => emit_flow(&mut asm, &idx, &rets, &i, count + 1, depth),
+            Term::Flow(i) => emit_flow(&mut asm, &idx, &rets, &b.table, &i, count + 1, depth),
             Term::Jcc(cc, t, next) => {
                 asm.push_cond(cc);
                 asm.body.push(W::If(BlockType::Empty));
