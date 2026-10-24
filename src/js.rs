@@ -2,6 +2,7 @@
 //! DLL が 32 ビットか 64 ビットかは PE ヘッダーで見分け、どちらも同じ JsVst として扱う
 use crate::vst::Vst;
 use crate::vst32::Vst32;
+use crate::vst32_gui::Editor;
 use wasm_bindgen::prelude::*;
 
 enum Plugin {
@@ -197,7 +198,7 @@ impl JsVst {
     pub fn has_editor(&mut self) -> bool {
         match &mut self.0 {
             Plugin::X86(v) => v.has_editor().unwrap_or(false),
-            Plugin::X64(_) => false,
+            Plugin::X64(v) => v.has_editor().unwrap_or(false),
         }
     }
 
@@ -206,7 +207,7 @@ impl JsVst {
     pub fn editor_open(&mut self) -> Result<Vec<i32>, JsError> {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
-            Plugin::X64(_) => Err(JsError::new("64 ビットの画面は未対応です")),
+            Plugin::X64(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
         }
     }
 
@@ -215,7 +216,7 @@ impl JsVst {
     pub fn editor_mouse(&mut self, msg: u32, x: i32, y: i32, keys: u32) -> Result<(), JsError> {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
-            Plugin::X64(_) => Ok(()),
+            Plugin::X64(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
         }
     }
 
@@ -224,7 +225,7 @@ impl JsVst {
     pub fn editor_idle(&mut self) -> Result<(), JsError> {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
-            Plugin::X64(_) => Ok(()),
+            Plugin::X64(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
         }
     }
 
@@ -233,7 +234,7 @@ impl JsVst {
     pub fn editor_frame(&self) -> Option<Vec<u8>> {
         match &self.0 {
             Plugin::X86(v) => v.editor_frame().map(|(_, _, px)| px),
-            Plugin::X64(_) => None,
+            Plugin::X64(v) => v.editor_frame().map(|(_, _, px)| px),
         }
     }
 
@@ -242,7 +243,7 @@ impl JsVst {
     pub fn editor_changes(&mut self) -> Vec<f32> {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
-            Plugin::X64(_) => Vec::new(),
+            Plugin::X64(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
         }
     }
 
@@ -250,7 +251,7 @@ impl JsVst {
     pub fn editor_close(&mut self) -> Result<(), JsError> {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
-            Plugin::X64(_) => Ok(()),
+            Plugin::X64(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
         }
     }
 }

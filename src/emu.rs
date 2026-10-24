@@ -145,6 +145,8 @@ impl Emu {
         const IREG: [usize; 4] = [1, 2, 8, 9]; // rcx, rdx, r8, r9
         let stack_args: Vec<&Arg> = args.iter().skip(4).collect();
         let mut rsp = self.cpu.regs[RSP];
+        // ホストの関数の中から呼ばれる（ウィンドウプロシージャなど）ことがあるので、戻ったあとに rsp と命令数の見張りの起点を戻す
+        let (saved_rsp, saved_start) = (rsp, self.call_start);
         let extra = 32 + stack_args.len() * 8;
         let total = if (extra + 8) % 16 == 0 { extra } else { extra + 8 };
         rsp -= total as u64;
@@ -161,7 +163,10 @@ impl Emu {
         }
         self.cpu.push(&mut self.mem, RETURN_MAGIC)?;
         self.cpu.rip = func;
-        self.run()?;
+        let r = self.run();
+        self.call_start = saved_start;
+        r?;
+        self.cpu.regs[RSP] = saved_rsp;
         Ok(self.cpu.regs[0])
     }
 

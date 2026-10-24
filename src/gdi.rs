@@ -115,6 +115,18 @@ impl Gdi {
     }
 
     /// DC の描く先のビットマップ
+    /// dc の面の (x, y) から、w × h の画素（0x00RRGGBB、上の行から）を写す
+    pub fn put_pixels(&mut self, dc: u32, x: i32, y: i32, w: i32, h: i32, px: &[u32]) {
+        let Some((bm, _)) = self.target(dc) else { return };
+        for j in 0..h {
+            for i in 0..w {
+                if let Some(&c) = px.get((j * w + i) as usize) {
+                    bm.set(x + i, y + j, c);
+                }
+            }
+        }
+    }
+
     fn target(&mut self, dc: u32) -> Option<(&mut Bitmap, Dc)> {
         let d = self.dc(dc)?.clone();
         let b = self.bitmap_mut(d.bitmap)?;

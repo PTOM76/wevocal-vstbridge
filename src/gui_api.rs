@@ -112,18 +112,18 @@ fn resolve_inner(name: &str) -> Option<HostFn> {
             let base = e.gui.base as u32;
             let Some(w) = e.gui.windows.get(&h) else { return Ok(0) };
             Ok(match w.longs.get(&idx) {
-                Some(v) => *v as u64,
+                Some(v) => *v,
                 None if idx == -4 => e.gui.classes.get(&w.class).map(|c| c.wndproc).unwrap_or(0) as u64,
                 None if idx == -6 => base as u64,
                 None => 0,
             })
         }),
         "SetWindowLongA" => boxed(|e| {
-            let (h, idx, v) = (a(e, 1)?, i(e, 2)?, a(e, 3)?);
-            let cls = e.gui.windows.get(&h).and_then(|w| e.gui.classes.get(&w.class)).map(|c| c.wndproc).unwrap_or(0);
+            // 64 ビットの SetWindowLongPtr の値は 64 ビットのまま覚える（JUCE は GWLP_USERDATA に 64 ビットの目印を入れる）
+            let (h, idx, v) = (a(e, 1)?, i(e, 2)?, arg(e, 3)?);
+            let cls = e.gui.windows.get(&h).and_then(|w| e.gui.classes.get(&w.class)).map(|c| c.wndproc as u64).unwrap_or(0);
             let Some(w) = e.gui.windows.get_mut(&h) else { return Ok(0) };
-            let old = w.longs.insert(idx, v).unwrap_or(if idx == -4 { cls } else { 0 });
-            Ok(old as u64)
+            Ok(w.longs.insert(idx, v).unwrap_or(if idx == -4 { cls } else { 0 }))
         }),
         "GetParent" => boxed(|e| Ok(e.gui.windows.get(&a(e, 1)?).map(|w| w.parent).unwrap_or(0) as u64)),
         "GetWindowRect" => boxed(|e| {
@@ -390,6 +390,10 @@ fn resolve_inner(name: &str) -> Option<HostFn> {
         }),
         "BitBlt" => boxed(|e| {
             let (dst, dx, dy, w, h, src, sx, sy, rop) = (a(e, 1)?, i(e, 2)?, i(e, 3)?, i(e, 4)?, i(e, 5)?, a(e, 6)?, i(e, 7)?, i(e, 8)?, a(e, 9)?);
+            // プラグインが直接書いた DIB の画素を先に反映する
+            if let Some(b) = e.gui.gdi.dc(src).map(|d| d.bitmap) {
+                crate::gui_api_w::sync_dib(e, b)?;
+            }
             e.gui.gdi.blit(dst, dx, dy, w, h, (src != 0).then_some(src), sx, sy, rop);
             Ok(1)
         }),

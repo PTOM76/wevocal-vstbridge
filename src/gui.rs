@@ -19,7 +19,7 @@ pub struct Window {
     /// 描く面（ビットマップのハンドル）
     pub surface: u32,
     /// GetWindowLong、SetWindowLong で出し入れする値（添字 → 値。-4 はウィンドウプロシージャ、-21 は利用者のデータ）
-    pub longs: HashMap<i32, u32>,
+    pub longs: HashMap<i32, u64>,
 }
 
 pub struct Class {
@@ -51,11 +51,15 @@ pub struct Gui {
     pub pending: bool,
     /// リソースを探すイメージの基点
     pub base: u64,
+    /// CreateDIBSection で作ったビットマップ → (画素のゲストの番地, 幅, 高さ, 上の行から並ぶか, 1 画素のビット数)。描く前にゲストのメモリから写す
+    pub dibs: HashMap<u32, (u64, i32, i32, bool, u32)>,
+    /// PostMessage で積まれたメッセージ（ウィンドウ, メッセージ, wParam, lParam）。idle のときに届ける
+    pub posted: Vec<(u32, u32, u64, u64)>,
 }
 
 impl Gui {
     pub fn new() -> Gui {
-        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, base: 0x1000_0000 }
+        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, base: 0x1000_0000, dibs: HashMap::new(), posted: Vec::new() }
     }
 
     /// ウィンドウを作る（描く面は bg で塗る）。ハンドルを返す
@@ -152,12 +156,21 @@ impl Emu {
     /// ウィンドウにメッセージを送り、ウィンドウプロシージャ（プラグインの関数）の戻り値を返す。プロシージャが無ければ 0
     pub fn send_message(&mut self, hwnd: u32, msg: u32, wparam: u32, lparam: u32) -> R<u64> {
         let Some(win) = self.gui.windows.get(&hwnd) else { return Ok(0) };
-        let proc = win.longs.get(&-4).copied().or_else(|| self.gui.classes.get(&win.class).map(|c| c.wndproc)).unwrap_or(0);
+        let proc = win.longs.get(&-4).copied().or_else(|| self.gui.classes.get(&win.class).map(|c| c.wndproc as u64)).unwrap_or(0);
         if proc == 0 {
             return Ok(0);
         }
         use crate::emu::Arg;
-        self.call32(proc, &[Arg::Int(hwnd as u64), Arg::Int(msg as u64), Arg::Int(wparam as u64), Arg::Int(lparam as u64)])
+        let args = [Arg::Int(hwnd as u64), Arg::Int(msg as u64), Arg::Int(wparam as u64), Arg::Int(lparam as u64)];
+        if self.bits() == 64 { self.call(proc, &args) } else { self.call32(proc as u32, &args) }
+    }
+
+    /// PostMessage で積まれたメッセージを届ける（届ける間に積まれた分は次の回）
+    pub fn deliver_posted(&mut self) -> R<()> {
+        for (h, m, w, l) in std::mem::take(&mut self.gui.posted) {
+            self.send_message(h, m, w as u32, l as u32)?;
+        }
+        Ok(())
     }
 
     /// 子ウィンドウ全部に WM_PAINT を送る（描き直し）

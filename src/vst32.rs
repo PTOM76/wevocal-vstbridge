@@ -58,6 +58,7 @@ impl Vst32 {
     pub fn load(dll: &[u8]) -> R<Vst32> {
         let mut emu = Emu::new32();
         let img = pe32::load(&mut emu, dll, host_stubs::resolve, host_stubs::unknown)?;
+        emu.gui.base = img.base as u64;
         let entry = img.export("VSTPluginMain").or_else(|| img.export("main")).ok_or_else(|| Fault("VSTPluginMain が無い".into()))?;
 
         // ホストへの呼び出し（audioMasterCallback）。opcode は 2 番目の引数（スタックの上から 2 つ目）
