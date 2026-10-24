@@ -70,6 +70,8 @@ pub struct Emu {
     pub(crate) call_start: u64,
     /// ホストの関数が「ここで中断してほしい」と要求した（run が YIELD で止まる。再開は resume）
     pub yield_req: bool,
+    /// step_call で少しずつ進めている間 true（ホストの関数の中からの入れ子の呼び出しは、途中で止めずに最後まで動かす）
+    slicing: bool,
     /// プラグインが作ったスレッド（threads.rs。交代で少しずつ動かす）
     pub threads: crate::threads::Threads,
     /// 全命令とレジスタを出す（環境変数 VSTBRIDGE_TRACE。毎命令は読まないよう、作るときに 1 度だけ読む）
@@ -155,7 +157,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x1020, 8, teb + 0x1800);
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), heap_free: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, threads: Default::default(), trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_calls: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), heap_free: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, slicing: false, threads: Default::default(), trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_calls: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -174,11 +176,67 @@ impl Emu {
     /// Windows x64 の呼び出しの決まりで func を呼び、rax（戻り値）を返す。
     /// 整数の引数は rcx、rdx、r8、r9 の順。浮動小数点は xmm0〜xmm3。5 つ目からはスタック。呼ぶ側が影の領域（32 バイト）を空ける
     pub fn call(&mut self, func: u64, args: &[Arg]) -> R<u64> {
+        // ホストの関数の中から呼ばれる（ウィンドウプロシージャなど）ことがあるので、戻ったあとに rsp と命令数の見張りの起点を戻す
+        let saved_start = self.call_start;
+        let saved_rsp = self.begin_call64(func, args)?;
+        let r = self.run_nested();
+        self.call_start = saved_start;
+        r?;
+        self.cpu.regs[RSP] = saved_rsp;
+        Ok(self.cpu.regs[0])
+    }
+
+    /// 入れ子の呼び出しを動かす。少しずつ進めている（step_call）途中なら、止めずに最後まで動かす
+    fn run_nested(&mut self) -> R<()> {
+        if !self.slicing {
+            return self.run();
+        }
+        self.slicing = false;
+        let saved = std::mem::replace(&mut self.max_steps, LOAD_MAX_STEPS);
+        let r = self.run();
+        self.max_steps = saved;
+        self.slicing = true;
+        r
+    }
+
+    /// 呼び出しの準備だけをする（引数と戻りの印を積み、rip を func にする。32 ビットは cdecl）。戻ったあとに戻す rsp を返す
+    pub fn begin_call(&mut self, func: u64, args: &[Arg]) -> R<u64> {
+        if self.bits == 32 {
+            let saved = self.cpu.regs[RSP];
+            for a in args.iter().rev() {
+                self.cpu.push(&mut self.mem, a.bits())?;
+            }
+            self.cpu.push(&mut self.mem, RETURN_MAGIC)?;
+            self.cpu.rip = func;
+            return Ok(saved);
+        }
+        self.begin_call64(func, args)
+    }
+
+    /// begin_call した呼び出しを、命令数 budget まで進める。終わったら rsp を戻して Some(戻り値)、使い切ったら None（次の呼び出しで続ける）
+    pub fn step_call(&mut self, budget: u64, saved_rsp: u64) -> R<Option<u64>> {
+        let saved_max = std::mem::replace(&mut self.max_steps, budget);
+        self.slicing = true;
+        let r = self.run();
+        self.slicing = false;
+        self.max_steps = saved_max;
+        match r {
+            Ok(()) => {
+                self.cpu.regs[RSP] = saved_rsp;
+                let v = self.cpu.regs[0];
+                Ok(Some(if self.bits == 32 { v & 0xffff_ffff } else { v }))
+            }
+            Err(f) if f.0.starts_with("step limit") => Ok(None),
+            Err(f) => Err(f),
+        }
+    }
+
+    /// Windows x64 の呼び出しの準備（call の前半）。戻ったあとに戻す rsp を返す
+    fn begin_call64(&mut self, func: u64, args: &[Arg]) -> R<u64> {
         const IREG: [usize; 4] = [1, 2, 8, 9]; // rcx, rdx, r8, r9
         let stack_args: Vec<&Arg> = args.iter().skip(4).collect();
         let mut rsp = self.cpu.regs[RSP];
-        // ホストの関数の中から呼ばれる（ウィンドウプロシージャなど）ことがあるので、戻ったあとに rsp と命令数の見張りの起点を戻す
-        let (saved_rsp, saved_start) = (rsp, self.call_start);
+        let saved_rsp = rsp;
         let extra = 32 + stack_args.len() * 8;
         let total = if (extra + 8) % 16 == 0 { extra } else { extra + 8 };
         rsp -= total as u64;
@@ -195,11 +253,7 @@ impl Emu {
         }
         self.cpu.push(&mut self.mem, RETURN_MAGIC)?;
         self.cpu.rip = func;
-        let r = self.run();
-        self.call_start = saved_start;
-        r?;
-        self.cpu.regs[RSP] = saved_rsp;
-        Ok(self.cpu.regs[0])
+        Ok(saved_rsp)
     }
 
     /// Windows x86（32 ビット）の呼び出しの決まり（cdecl）で func を呼ぶ。引数は右から左の順でスタックに積む。
@@ -212,7 +266,7 @@ impl Emu {
         self.cpu.rip = func as u64;
         // ホストの関数の中から呼ばれる（ウィンドウプロシージャなど）ことがあるので、命令数の見張りの起点を戻す
         let saved = self.call_start;
-        let r = self.run();
+        let r = self.run_nested();
         self.call_start = saved;
         r?;
         Ok(self.cpu.regs[0] & 0xffff_ffff)
@@ -384,6 +438,7 @@ impl Emu {
 }
 
 /// 呼び出しの引数
+#[derive(Clone, Copy)]
 pub enum Arg {
     Int(u64),
     F32(f32),

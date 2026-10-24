@@ -13,6 +13,7 @@ pub mod gui_api;
 pub mod gui_api_w;
 pub mod host_stubs;
 pub mod jit;
+pub mod loader;
 #[cfg(target_arch = "wasm32")]
 pub mod js;
 pub mod mem;

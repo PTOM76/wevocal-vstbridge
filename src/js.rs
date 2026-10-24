@@ -1,5 +1,6 @@
 //! wasm-bindgen の窓口。JS（ブラウザ、Node）から VST2 の DLL を読み込み、名前、つまみ、音の処理を使えるようにする。
 //! DLL が 32 ビットか 64 ビットかは PE ヘッダーで見分け、どちらも同じ JsVst として扱う
+use crate::loader::{Loaded, Loader};
 use crate::vst::Vst;
 use crate::vst32::Vst32;
 use crate::vst32_gui::Editor;
@@ -10,29 +11,48 @@ enum Plugin {
     X86(Vst32),
 }
 
-/// PE ヘッダーの Machine（0x14c = x86、0x8664 = x64）を読む。PE でなければ None
-fn machine(dll: &[u8]) -> Option<u16> {
-    let pe = u32::from_le_bytes(dll.get(0x3c..0x40)?.try_into().ok()?) as usize;
-    if dll.get(pe..pe + 4)? != b"PE\0\0" {
-        return None;
-    }
-    Some(u16::from_le_bytes(dll.get(pe + 4..pe + 6)?.try_into().ok()?))
-}
-
 #[wasm_bindgen]
 pub struct JsVst(Plugin);
+
+impl From<Loaded> for JsVst {
+    fn from(l: Loaded) -> Self {
+        JsVst(match l {
+            Loaded::X64(v) => Plugin::X64(v),
+            Loaded::X86(v) => Plugin::X86(v),
+        })
+    }
+}
+
+/// DLL の読み込みを少しずつ進める（AudioWorklet の中で、音のスレッドを長く止めないため）。
+/// new で置いたあと、step を終わる（true）まで呼び、finish で JsVst にする
+#[wasm_bindgen]
+pub struct JsVstLoader(Loader);
+
+#[wasm_bindgen]
+impl JsVstLoader {
+    /// DLL を置き、import をつなぐ（命令はまだ動かさない）
+    #[wasm_bindgen(constructor)]
+    pub fn new(dll: &[u8]) -> Result<JsVstLoader, JsError> {
+        Loader::new(dll).map(JsVstLoader).map_err(|e| JsError::new(&e.0))
+    }
+
+    /// 命令を最大 budget 個動かして読み込みを進める。終わったら true
+    pub fn step(&mut self, budget: f64) -> Result<bool, JsError> {
+        self.0.step(budget as u64).map_err(|e| JsError::new(&e.0))
+    }
+
+    /// 読み込みが終わったものを JsVst にする（この loader は使えなくなる）
+    pub fn finish(self) -> Result<JsVst, JsError> {
+        self.0.finish().map(JsVst::from).map_err(|e| JsError::new(&e.0))
+    }
+}
 
 #[wasm_bindgen]
 impl JsVst {
     /// DLL のバイト列から読み込む（32 ビットも 64 ビットも）
     #[wasm_bindgen(constructor)]
     pub fn new(dll: &[u8]) -> Result<JsVst, JsError> {
-        match machine(dll) {
-            Some(0x14c) => Vst32::load(dll).map(|v| JsVst(Plugin::X86(v))).map_err(|e| JsError::new(&e.0)),
-            Some(0x8664) => Vst::load(dll).map(|v| JsVst(Plugin::X64(v))).map_err(|e| JsError::new(&e.0)),
-            Some(m) => Err(JsError::new(&format!("未対応の CPU です（Machine={m:#x}）"))),
-            None => Err(JsError::new("DLL（PE）ではありません")),
-        }
+        Loader::load(dll).map(JsVst::from).map_err(|e| JsError::new(&e.0))
     }
 
     /// 32 ビットの DLL か

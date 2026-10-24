@@ -1,6 +1,7 @@
 //! 32 ビットの VST2 の DLL を読み込み、エミュレーターの上で動かす。64 ビット版（vst.rs）と違い、
 //! ポインターが 4 バイトなので AEffect の中の位置（オフセット）が変わる。import は host_stubs.rs のスタブで解決する
 use crate::emu::{Arg, Emu};
+use crate::loader::Step;
 use crate::host_stubs;
 use crate::mem::{Fault, R};
 use crate::pe32;
@@ -54,8 +55,16 @@ struct Io {
 }
 
 impl Vst32 {
-    /// DLL のバイト列から読み込む。import はログに出すだけで、知っているものだけ動く（host_stubs.rs）
+    /// DLL のバイト列から読み込む。import はログに出すだけで、知っているものだけ動く（host_stubs.rs）。手順は loader.rs で最後まで進める
     pub fn load(dll: &[u8]) -> R<Vst32> {
+        match crate::loader::Loader::load(dll)? {
+            crate::loader::Loaded::X86(v) => Ok(v),
+            crate::loader::Loaded::X64(_) => Err(Fault("64 ビットの DLL です".into())),
+        }
+    }
+
+    /// 読み込みの前半: DLL を置いて import をつなぎ、動かす手順（DllMain、VSTPluginMain、初期化の dispatch）を返す
+    pub(crate) fn prepare(dll: &[u8]) -> R<(Emu, Vec<Step>, u64, u64)> {
         let mut emu = Emu::new32();
         let img = pe32::load(&mut emu, dll, host_stubs::resolve, host_stubs::unknown)?;
         emu.gui.base = img.base as u64;
@@ -83,29 +92,28 @@ impl Vst32 {
             })
         }));
 
+        let mut steps = Vec::new();
         if img.entry != img.base {
-            emu.call32(img.entry, &[Arg::Int(img.base as u64), Arg::Int(1), Arg::Int(0)])?;
+            steps.push(Step::Call(img.entry as u64, vec![Arg::Int(img.base as u64), Arg::Int(1), Arg::Int(0)]));
         }
+        steps.push(Step::Main(entry as u64, host));
+        // ホストが普通に行う初期化（開く、プログラム、サンプルレート、ブロックサイズ、電源オン）。これをしないと内部バッファが未初期化のまま
+        steps.push(Step::Dispatch(EFF_OPEN, 0, 0, 0.0));
+        steps.push(Step::Dispatch(EFF_SET_PROGRAM, 0, 0, 0.0));
+        steps.push(Step::Dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 48000.0));
+        // ブロックサイズは value で渡す（ptr ではない）
+        steps.push(Step::Dispatch(EFF_SET_BLOCK_SIZE, 0, 2048, 0.0));
+        steps.push(Step::Dispatch(EFF_MAINS_CHANGED, 0, 1, 0.0));
+        Ok((emu, steps, time, img.base as u64))
+    }
 
-        let effect = emu.call32(entry, &[Arg::Int(host)])? as u32;
-        if effect == 0 {
-            return Err(Fault("VSTPluginMain が 0 を返した".into()));
-        }
-        let magic = emu.mem.read_n(effect as u64 + off::MAGIC, 4)?;
-        if magic != VST_MAGIC {
-            return Err(Fault(format!("magic が違う: {magic:#x}")));
-        }
+    /// 読み込みが終わった Emu と AEffect の番地からプラグインにする
+    pub(crate) fn from_loaded(emu: Emu, effect: u64, time: u64, base: u64) -> R<Vst32> {
+        let effect = effect as u32;
         let num_params = emu.mem.read_n(effect as u64 + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect as u64 + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect as u64 + off::NUM_OUTPUTS, 4)? as i32;
-        let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs, base: img.base as u32, io: None, events: 0, time };
-        // ホストが普通に行う初期化（開く、サンプルレート、ブロックサイズ、電源オン）。これをしないと内部バッファが未初期化のまま
-        v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
-        v.dispatch(EFF_SET_PROGRAM, 0, 0, 0, 0.0)?;
-        v.dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 0, 48000.0)?;
-        v.dispatch(EFF_SET_BLOCK_SIZE, 0, 2048, 0, 0.0)?; // ブロックサイズは value で渡す（ptr ではない）
-        v.dispatch(EFF_MAINS_CHANGED, 0, 1, 0, 0.0)?;
-        Ok(v)
+        Ok(Vst32 { emu, effect, num_params, num_inputs, num_outputs, base: base as u32, io: None, events: 0, time })
     }
 
     /// dispatcher(effect, opcode, index, value, ptr, opt) を呼ぶ

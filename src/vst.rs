@@ -1,11 +1,11 @@
 //! VST2 の DLL を読み込み、エミュレーターの上で動かす（音を通す）。testplug/gain.dll で確かめる
 use crate::emu::{Arg, Emu};
+use crate::loader::Step;
 use crate::mem::{Fault, R};
 use crate::pe;
 
 /// AEffect 構造体の中の位置（vst2.h の並び。x64 のそろえ方で計算）
 mod off {
-    pub const MAGIC: u64 = 0;
     pub const DISPATCHER: u64 = 8;
     pub const SET_PARAMETER: u64 = 24;
     pub const GET_PARAMETER: u64 = 32;
@@ -15,7 +15,6 @@ mod off {
     pub const PROCESS_REPLACING: u64 = 120;
 }
 
-const VST_MAGIC: u64 = 0x5673_7450; // 'VstP'
 const EFF_OPEN: u64 = 0;
 const EFF_SET_SAMPLE_RATE: u64 = 10;
 const EFF_SET_BLOCK_SIZE: u64 = 11;
@@ -48,10 +47,17 @@ struct Io {
 }
 
 impl Vst {
-    /// DLL のバイト列から読み込み、VSTPluginMain を呼んで AEffect を受け取る
+    /// DLL のバイト列から読み込み、VSTPluginMain を呼んで AEffect を受け取る（loader.rs の手順を最後まで進める）
     pub fn load(dll: &[u8]) -> R<Vst> {
+        match crate::loader::Loader::load(dll)? {
+            crate::loader::Loaded::X64(v) => Ok(v),
+            crate::loader::Loaded::X86(_) => Err(Fault("32 ビットの DLL です".into())),
+        }
+    }
+
+    /// 読み込みの前半: DLL を置いて import をつなぎ、動かす手順（TLS のコールバック、DllMain、VSTPluginMain、初期化の dispatch）を返す
+    pub(crate) fn prepare(dll: &[u8]) -> R<(Emu, Vec<Step>, u64, u64)> {
         let mut emu = Emu::new();
-        emu.max_steps = crate::emu::LOAD_MAX_STEPS;
         let img = pe::load(&mut emu.mem, dll)?;
         emu.image_base = img.base;
         emu.gui.base = img.base;
@@ -69,34 +75,31 @@ impl Vst {
             })
         }));
 
+        let mut steps = Vec::new();
         // TLS の領域を作り、コールバックを DllMain と同じ引数で呼ぶ
         for cb in pe::setup_tls(&mut emu, dll, img.base)? {
-            emu.call(cb, &[Arg::Int(img.base), Arg::Int(1), Arg::Int(0)])?;
+            steps.push(Step::Call(cb, vec![Arg::Int(img.base), Arg::Int(1), Arg::Int(0)]));
         }
         // DLL の入口（DllMainCRTStartup）を先に呼ぶ（静的な初期化のため。無くても動くものもある）
         if img.entry != img.base {
-            emu.call(img.entry, &[Arg::Int(img.base), Arg::Int(1), Arg::Int(0)])?;
+            steps.push(Step::Call(img.entry, vec![Arg::Int(img.base), Arg::Int(1), Arg::Int(0)]));
         }
+        steps.push(Step::Main(entry, host));
+        // ホストと同じ手順で使える状態にする（32 ビット版の vst32.rs と同じ。JUCE などは resume されるまで処理を始めない）
+        steps.push(Step::Dispatch(EFF_OPEN, 0, 0, 0.0));
+        steps.push(Step::Dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 48000.0));
+        steps.push(Step::Dispatch(EFF_SET_BLOCK_SIZE, 0, 2048, 0.0));
+        steps.push(Step::Dispatch(EFF_MAINS_CHANGED, 0, 1, 0.0));
+        Ok((emu, steps, time, img.base))
+    }
 
-        let effect = emu.call(entry, &[Arg::Int(host)])?;
-        if effect == 0 {
-            return Err(Fault("VSTPluginMain が 0 を返した".into()));
-        }
-        let magic = emu.mem.read_n(effect + off::MAGIC, 4)?;
-        if magic != VST_MAGIC {
-            return Err(Fault(format!("magic が違う: {magic:#x}")));
-        }
+    /// 読み込みが終わった Emu と AEffect の番地からプラグインにする
+    pub(crate) fn from_loaded(mut emu: Emu, effect: u64, time: u64) -> R<Vst> {
         let num_params = emu.mem.read_n(effect + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect + off::NUM_OUTPUTS, 4)? as i32;
-        let mut v = Vst { emu, effect, num_params, num_inputs, num_outputs, io: None, events: 0, time };
-        // ホストと同じ手順で使える状態にする（32 ビット版の vst32.rs と同じ。JUCE などは resume されるまで処理を始めない）
-        v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
-        v.dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 0, 48000.0)?;
-        v.dispatch(EFF_SET_BLOCK_SIZE, 0, 2048, 0, 0.0)?;
-        v.dispatch(EFF_MAINS_CHANGED, 0, 1, 0, 0.0)?;
-        v.emu.max_steps = crate::emu::MAX_STEPS;
-        Ok(v)
+        emu.max_steps = crate::emu::MAX_STEPS;
+        Ok(Vst { emu, effect, num_params, num_inputs, num_outputs, io: None, events: 0, time })
     }
 
     fn ptr(&self, field: u64) -> R<u64> {
