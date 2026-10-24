@@ -39,11 +39,13 @@ pub struct Cpu {
     pub jit_bail: u32,
     /// JIT の遅い道へ値を渡す置き場（64 ビットの div の割る数）
     pub jit_tmp: u64,
+    /// JIT の関数の、入るブロックの番号（まとめたブロックの途中からも入れる）
+    pub jit_entry: u32,
 }
 
 impl Default for Cpu {
     fn default() -> Self {
-        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0, fpu: [0.0; 8], fpu_top: 0, fpu_c: (false, false, false, false), fpu_depth: 0, fpu_cw: 0x037f, jit_bail: 0, jit_tmp: 0 }
+        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0, fpu: [0.0; 8], fpu_top: 0, fpu_c: (false, false, false, false), fpu_depth: 0, fpu_cw: 0x037f, jit_bail: 0, jit_tmp: 0, jit_entry: 0 }
     }
 }
 

@@ -21,6 +21,8 @@ function run(dll, jit) {
   // DENY=bts,imul で、その命令を JIT で変換しない（不具合の切り分け）
   if (process.env.DENY) v.setJitDeny(process.env.DENY)
   if (jit && process.env.MISSES) v.countJitMisses()
+  // THRESHOLD=32 で、変換を始める実行回数を変える
+  if (process.env.THRESHOLD) v.setJitThreshold(Number(process.env.THRESHOLD))
   const ins = Math.max(1, v.numInputs), params = v.numParams
   // 入力が 0 の楽器には、ノートを送って音の処理を通す（50 ブロックごとに和音を変える）
   const synth = v.numInputs === 0
@@ -39,7 +41,7 @@ function run(dll, jit) {
     const input = Array.from({ length: ins }, () => Float32Array.from({ length: n }, () => rnd() * 0.5))
     for (const ch of v.process(input, n)) out.push(new Uint32Array(ch.buffer.slice(0)))
   }
-  return { out, ms: performance.now() - t0, coverage: v.jitCoverage(), misses: jit ? v.jitMisses() : '' }
+  return { out, ms: performance.now() - t0, coverage: v.jitCoverage(), misses: jit ? v.jitMisses() : '', stats: v.jitStats().split(' ') }
 }
 
 let failed = 0
@@ -51,7 +53,7 @@ for (const path of paths) {
     let diff = -1
     for (let k = 0; k < a.out.length && diff < 0; k++) for (let j = 0; j < a.out[k].length; j++) if (a.out[k][j] !== b.out[k][j]) { diff = k; break }
     if (diff >= 0) failed++
-    console.log(`${diff < 0 ? 'ok  ' : 'NG  '}${name}: なし ${a.ms.toFixed(0)} ms、あり ${b.ms.toFixed(0)} ms（${(a.ms / b.ms).toFixed(2)} 倍）、JIT の命令 ${(b.coverage * 100).toFixed(0)}%${diff >= 0 ? `、最初の違い ${diff} 番目の塊` : ''}`)
+    console.log(`${diff < 0 ? 'ok  ' : 'NG  '}${name}: なし ${a.ms.toFixed(0)} ms、あり ${b.ms.toFixed(0)} ms（${(a.ms / b.ms).toFixed(2)} 倍）、JIT の命令 ${(b.coverage * 100).toFixed(0)}%、変換 ${b.stats[0]} 個 ${b.stats[1]} ms${diff >= 0 ? `、最初の違い ${diff} 番目の塊` : ''}`)
     // MISSES=1 なら、JIT で動かせなかったブロックの先頭の命令を多い順に表示する
     if (process.env.MISSES) console.log(b.misses.replace(/^/gm, '    '))
   } catch (e) {

@@ -1,4 +1,4 @@
-//! SSE の型の変換（cvt）、整数のレジスタとの行き来（movd、movq）、並べ替え（shufps、unpcklps、movhlps、movlhps）を wasm に変換する。
+//! SSE の型の変換（cvt）、整数のレジスタとの行き来（movd、movq）、並べ替え（shufps、unpcklps、shufpd、unpcklpd など）、packed の比較とシフト、movmsk を wasm に変換する。
 //! インタープリター（src/sse.rs、src/sse2.rs）と同じ結果にする。cvtt の範囲外と NaN は x86 と同じ「最小の負の数」
 use super::*;
 
@@ -32,6 +32,11 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
         }
         Unpcklps | Shufps => is_xmm(i, 0) && (is_xmm(i, 1) || is_mem(i, 1, &[16])),
         Movhlps | Movlhps => is_xmm(i, 0) && is_xmm(i, 1),
+        Cvtps2pd => is_xmm(i, 0) && (is_xmm(i, 1) || is_mem(i, 1, &[8])),
+        Cvtpd2ps | Unpcklpd | Unpckhpd | Punpcklqdq | Punpckhqdq | Shufpd | Cmppd | Cmpps => is_xmm(i, 0) && (is_xmm(i, 1) || is_mem(i, 1, &[16])),
+        // シフトは即値の数だけ
+        Psllq | Psrlq | Pslld | Psrld | Psrad => is_xmm(i, 0) && i.op_kind(1) == OpKind::Immediate8,
+        Movmskps | Movmskpd => is_gpr(i, 0) && is_xmm(i, 1),
         _ => false,
     };
     ok.then_some(Rw { kill: 0, emit: 0, read: 0 })
@@ -171,7 +176,99 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             asm.body.push(W::I8x16Shuffle(lanes32(sel)));
             asm.body.push(W::V128Store(xmm_arg(d, 4)));
         }
+        // f32 の下位 2 つ → f64 2 つ
+        M::Cvtps2pd => {
+            let d = xmm(i.op_register(0))?;
+            asm.cpu();
+            if is_xmm(i, 1) {
+                asm.cpu();
+                asm.body.push(W::V128Load(xmm_arg(xmm(i.op_register(1))?, 4)));
+            } else {
+                xmm_ptr(asm, i, 1, 8, insn_addr, count)?;
+                asm.body.push(W::V128Load64Zero(MemArg { offset: 0, align: 0, memory_index: 0 }));
+            }
+            asm.body.extend([W::F64x2PromoteLowF32x4, W::V128Store(xmm_arg(d, 4))]);
+        }
+        // f64 2 つ → f32 の下位 2 つ（上位は 0）
+        M::Cvtpd2ps => {
+            let d = xmm(i.op_register(0))?;
+            asm.cpu();
+            let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+            asm.body.extend([v128ld(al), W::F32x4DemoteF64x2Zero, W::V128Store(xmm_arg(d, 4))]);
+        }
+        // 64 ビットの組の並べ替えと、packed の比較（a = 宛先、b = もう一方）
+        M::Unpcklpd | M::Unpckhpd | M::Punpcklqdq | M::Punpckhqdq | M::Shufpd | M::Cmppd | M::Cmpps => {
+            let d = xmm(i.op_register(0))?;
+            asm.cpu();
+            asm.cpu();
+            asm.body.push(W::V128Load(xmm_arg(d, 4)));
+            let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+            asm.body.push(v128ld(al));
+            let sel = match m {
+                M::Unpcklpd | M::Punpcklqdq => Some([0, 2]),
+                M::Unpckhpd | M::Punpckhqdq => Some([1, 3]),
+                M::Shufpd => Some([i.immediate8() & 1, 2 + ((i.immediate8() >> 1) & 1)]),
+                _ => None,
+            };
+            if let Some(sel) = sel {
+                asm.body.push(W::I8x16Shuffle(lanes32([sel[0] * 2, sel[0] * 2 + 1, sel[1] * 2, sel[1] * 2 + 1])));
+            } else {
+                cmp_packed(asm, m == M::Cmppd, i.immediate8());
+            }
+            asm.body.push(W::V128Store(xmm_arg(d, 4)));
+        }
+        // 即値のシフト。幅以上は 0（算術の右は符号で埋める）。wasm は数を幅で割った余りにするので、ここで分ける
+        M::Psllq | M::Psrlq | M::Pslld | M::Psrld | M::Psrad => {
+            let d = xmm(i.op_register(0))?;
+            let n = i.immediate8() as u32;
+            let bits = if matches!(m, M::Psllq | M::Psrlq) { 64 } else { 32 };
+            asm.cpu();
+            if n >= bits && m != M::Psrad {
+                asm.body.push(W::V128Const(0));
+            } else {
+                asm.cpu();
+                asm.body.extend([W::V128Load(xmm_arg(d, 4)), W::I32Const(n.min(bits - 1) as i32)]);
+                asm.body.push(match m {
+                    M::Psllq => W::I64x2Shl,
+                    M::Psrlq => W::I64x2ShrU,
+                    M::Pslld => W::I32x4Shl,
+                    M::Psrld => W::I32x4ShrU,
+                    _ => W::I32x4ShrS,
+                });
+            }
+            asm.body.push(W::V128Store(xmm_arg(d, 4)));
+        }
+        // 各組の符号のビットを並べる
+        M::Movmskps | M::Movmskpd => {
+            let (idx, size) = gpr(i.op_register(0))?;
+            asm.cpu();
+            asm.body.push(W::V128Load(xmm_arg(xmm(i.op_register(1))?, 4)));
+            asm.body.extend([if m == M::Movmskps { W::I32x4Bitmask } else { W::I64x2Bitmask }, W::I64ExtendI32U]);
+            asm.store_reg(idx, size);
+        }
         _ => return None,
     }
     Some(())
+}
+
+/// スタックの a、b を、cmpps、cmppd の述語 k（インタープリターの cmp_f と同じ 8 つ）で比べ、真の組をすべて 1 にする
+fn cmp_packed(asm: &mut Asm, pd: bool, k: u8) {
+    let (eq, lt, le, ne) = if pd { (W::F64x2Eq, W::F64x2Lt, W::F64x2Le, W::F64x2Ne) } else { (W::F32x4Eq, W::F32x4Lt, W::F32x4Le, W::F32x4Ne) };
+    let un = |asm: &mut Asm, ne: W<'static>| {
+        // NaN は自分と等しくない
+        asm.body.extend([W::LocalSet(V1), W::LocalTee(V0), W::LocalGet(V0), ne.clone(), W::LocalGet(V1), W::LocalGet(V1), ne, W::V128Or]);
+    };
+    match k & 7 {
+        0 => asm.body.push(eq),
+        1 => asm.body.push(lt),
+        2 => asm.body.push(le),
+        3 => un(asm, ne),
+        4 => asm.body.push(ne),
+        5 => asm.body.extend([lt, W::V128Not]),
+        6 => asm.body.extend([le, W::V128Not]),
+        _ => {
+            un(asm, ne);
+            asm.body.push(W::V128Not);
+        }
+    }
 }

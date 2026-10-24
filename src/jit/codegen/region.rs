@@ -243,6 +243,9 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs
         asm.body.push(W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }));
         asm.body.push(W::LocalSet(FT));
     }
+    // 入るブロックの番号は Cpu から読む（途中のブロックからも入れる）
+    asm.cpu();
+    asm.body.extend([W::I32Load(MemArg { offset: offset_of!(Cpu, jit_entry) as u64, align: 2, memory_index: 0 }), W::LocalSet(PC)]);
     asm.body.push(W::Loop(BlockType::Empty));
     for _ in 0..n {
         asm.body.push(W::Block(BlockType::Empty));
@@ -272,5 +275,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs
     }
     asm.body.push(W::End);
     asm.body.push(W::Unreachable);
-    Some(finish(asm))
+    let mut c = finish(asm);
+    c.entries = idx;
+    Some(c)
 }

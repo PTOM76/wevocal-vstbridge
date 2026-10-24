@@ -25,6 +25,8 @@ const CNT: u32 = 12; // i32 前のブロック（周）までに実行した命�
 const PC: u32 = 13; // i32 次に動かす、まとめたブロックの番号
 const X0: u32 = 14; // i64 作業用（64 ビットの積の上位など）
 const X1: u32 = 15;
+const V0: u32 = 16; // v128 作業用
+const V1: u32 = 17;
 /// ループを回す命令の数の上限（これを超えたら抜けて、命令数の見張りに戻す）
 const LOOP_LIMIT: i32 = 100_000;
 
@@ -971,6 +973,8 @@ pub use region::compile_block;
 pub struct Compiled {
     pub locals: Vec<(u32, ValType)>,
     pub body: Vec<W<'static>>,
+    /// 入れるブロックの番地（添字が cpu.jit_entry の番号）。1 つのブロックだけの関数は空
+    pub entries: Vec<u64>,
 }
 
 /// ブロックの終わり方
@@ -1112,7 +1116,7 @@ fn insn_flags(i: &Instruction) -> Option<u8> {
 }
 
 fn finish(asm: Asm) -> Compiled {
-    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (4, ValType::I32), (2, ValType::I64)], body: asm.body }
+    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (4, ValType::I32), (2, ValType::I64), (2, ValType::V128)], body: asm.body, entries: Vec::new() }
 }
 
 fn is_jcc(i: &Instruction) -> bool {

@@ -79,6 +79,25 @@ impl JsVst {
 ")
     }
 
+    /// 変換を始める実行回数（既定 8。調査用）
+    #[wasm_bindgen(js_name = setJitThreshold)]
+    pub fn set_jit_threshold(&mut self, n: u32) {
+        match &mut self.0 {
+            Plugin::X86(v) => v.emu.jit.threshold = n,
+            Plugin::X64(v) => v.emu.jit.threshold = n,
+        }
+    }
+
+    /// 変換した関数の数と、変換にかかった時間（"数 ms"。調査用）
+    #[wasm_bindgen(js_name = jitStats)]
+    pub fn jit_stats(&self) -> String {
+        let j = match &self.0 {
+            Plugin::X86(v) => &v.emu.jit,
+            Plugin::X64(v) => &v.emu.jit,
+        };
+        format!("{} {:.0}", j.compiled, j.compile_ms)
+    }
+
     /// JIT を使うか（ありとなしで出力を比べるため。既定は使う）
     #[wasm_bindgen(js_name = setJit)]
     pub fn set_jit(&mut self, on: bool) {

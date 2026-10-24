@@ -89,13 +89,16 @@ pub fn selftest(x: u32) -> Result<u32, String> {
 
 /// 変換したブロックを覚えて動かす（wasm の中だけ）。ネイティブでは実行できないので、いつも覚えないまま（インタープリター）
 pub struct Jit {
-    /// ブロックの番地 → 変換した関数（None は「変換できない」と分かったもの）
+    /// ブロックの番地 → 変換した関数と入るブロックの番号（None は「変換できない」と分かったもの）。まとめた関数の途中のブロックも入れる
     #[cfg(target_arch = "wasm32")]
-    funcs: std::collections::HashMap<u64, Option<install::JitFn>, crate::emu::FastHash>,
+    funcs: std::collections::HashMap<u64, Option<(install::JitFn, u32)>, crate::emu::FastHash>,
     /// 番地ごとの実行回数（この回数を超えたら変換する）
     hits: std::collections::HashMap<u64, u32, crate::emu::FastHash>,
     /// 変換を始める回数
-    threshold: u32,
+    pub threshold: u32,
+    /// 変換した関数の数と、変換にかかった時間（ms。調査用）
+    pub compiled: u32,
+    pub compile_ms: f64,
     pub on: bool,
     /// インタープリターで動かした命令を jit_miss に数えるか（調査用。数えると遅くなる）
     pub count_miss: bool,
@@ -109,6 +112,8 @@ impl Default for Jit {
             funcs: Default::default(),
             hits: Default::default(),
             threshold,
+            compiled: 0,
+            compile_ms: 0.0,
             on: std::env::var("VSTBRIDGE_NOJIT").is_err(),
             count_miss: false,
         }
@@ -126,7 +131,7 @@ impl Jit {
 #[cfg(target_arch = "wasm32")]
 impl Jit {
     /// rip のブロックの変換済み関数。まだなら、回数を数え、十分なら変換する
-    pub fn get(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize, regs: &[u64; 16]) -> Option<install::JitFn> {
+    pub fn get(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize, regs: &[u64; 16]) -> Option<(install::JitFn, u32)> {
         if let Some(f) = self.funcs.get(&rip) {
             return *f;
         }
@@ -135,10 +140,19 @@ impl Jit {
         if *h < self.threshold {
             return None;
         }
-        let f = codegen::compile_block(mem, bits, rip, max_block, regs).and_then(|c| {
-            let bytes = module(&c.locals, &c.body);
-            install::install(&bytes).ok()
-        });
+        let t0 = js_sys::Date::now();
+        let c = codegen::compile_block(mem, bits, rip, max_block, regs);
+        let entries = c.as_ref().map(|c| c.entries.clone()).unwrap_or_default();
+        let f = c.and_then(|c| install::install(&module(&c.locals, &c.body)).ok());
+        self.compiled += f.is_some() as u32;
+        self.compile_ms += js_sys::Date::now() - t0;
+        // まとめた中のほかのブロックも、まだ関数がなければこの関数の途中から入る
+        if let Some(f) = f {
+            for (k, &a) in entries.iter().enumerate().skip(1) {
+                self.funcs.entry(a).or_insert(Some((f, k as u32)));
+            }
+        }
+        let f = f.map(|f| (f, 0));
         self.funcs.insert(rip, f);
         f
     }
