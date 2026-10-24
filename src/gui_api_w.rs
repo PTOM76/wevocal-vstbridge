@@ -15,6 +15,9 @@ fn i(e: &Emu, n: u64) -> R<i32> {
 fn pw(e: &Emu) -> u64 {
     if e.bits() == 64 { 8 } else { 4 }
 }
+/// 偽のモニターのハンドル
+const MONITOR: u64 = 0x0001_0001;
+
 fn boxed(f: impl Fn(&mut Emu) -> R<u64> + 'static) -> Option<HostFn> {
     Some(Box::new(f))
 }
@@ -217,6 +220,51 @@ pub fn resolve(name: &str) -> Option<HostFn> {
             // tmHeight、tmAscent、tmDescent、tmInternalLeading、tmExternalLeading、tmAveCharWidth、tmMaxCharWidth、tmWeight
             for (k, v) in [h, asc, h - asc, 0, 0, h / 2, h, 400].iter().enumerate() {
                 e.mem.write_n(p + k as u64 * 4, 4, *v as u32 as u64)?;
+            }
+            Ok(1)
+        }),
+        // ---- 画面（モニター）と DPI。1920 × 1080、96 DPI の画面が 1 つあるものとする ----
+        "GetDpiForWindow" | "GetDpiForSystem" => boxed(|_| Ok(96)),
+        // HORZRES=8、VERTRES=10、BITSPIXEL=12、PLANES=14、LOGPIXELSX=88、LOGPIXELSY=90
+        "GetDeviceCaps" => boxed(|e| {
+            Ok(match a(e, 2)? {
+                8 => 1920,
+                10 => 1080,
+                12 => 32,
+                14 => 1,
+                88 | 90 => 96,
+                _ => 0,
+            })
+        }),
+        "MonitorFromWindow" | "MonitorFromPoint" | "MonitorFromRect" => boxed(|_| Ok(MONITOR)),
+        // EnumDisplayMonitors(dc, clip, proc, data)。proc(モニター, dc, 長方形, data) を 1 回呼ぶ
+        "EnumDisplayMonitors" => boxed(|e| {
+            let (f, data) = (arg(e, 3)?, arg(e, 4)?);
+            let r = e.mem.alloc32(16) as u64;
+            for (k, v) in [0u64, 0, 1920, 1080].iter().enumerate() {
+                e.mem.write_n(r + k as u64 * 4, 4, *v)?;
+            }
+            use crate::emu::Arg;
+            let args = [Arg::Int(MONITOR), Arg::Int(0), Arg::Int(r), Arg::Int(data)];
+            if e.bits() == 64 { e.call(f, &args)? } else { e.call32(f as u32, &args)? };
+            Ok(1)
+        }),
+        // MONITORINFO: cbSize、rcMonitor、rcWork、dwFlags（1 = 主の画面）
+        "GetMonitorInfoW" | "GetMonitorInfoA" => boxed(|e| {
+            let p = arg(e, 2)?;
+            for (k, v) in [0u64, 0, 1920, 1080, 0, 0, 1920, 1040, 1].iter().enumerate() {
+                e.mem.write_n(p + 4 + k as u64 * 4, 4, *v)?;
+            }
+            Ok(1)
+        }),
+        // WINDOWINFO: cbSize、rcWindow、rcClient（枠なし。同じ長方形）、…
+        "GetWindowInfo" => boxed(|e| {
+            let (h, p) = (a(e, 1)?, arg(e, 2)?);
+            let Some(w) = e.gui.windows.get(&h) else { return Ok(0) };
+            let (ww, wh) = (w.w, w.h);
+            let (ox, oy) = e.gui.origin(h);
+            for (k, v) in [ox, oy, ox + ww, oy + wh, ox, oy, ox + ww, oy + wh].iter().enumerate() {
+                e.mem.write_n(p + 4 + k as u64 * 4, 4, *v as u32 as u64)?;
             }
             Ok(1)
         }),
