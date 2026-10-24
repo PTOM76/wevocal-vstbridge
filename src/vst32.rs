@@ -38,6 +38,8 @@ pub struct Vst32 {
     pub base: u32,
     /// 音を通すときのバッファ（ブロックごとに確保し直さない。メモリが増え続けるため）
     io: Option<Io>,
+    /// audioMasterGetTime に返す VstTimeInfo の番地（process のたびに位置を進める）
+    time: u64,
     /// effProcessEvents に渡す VstEvents と VstMidiEvent 1 つ（最初に送るときに確保する）
     events: u64,
 }
@@ -59,20 +61,25 @@ impl Vst32 {
         let entry = img.export("VSTPluginMain").or_else(|| img.export("main")).ok_or_else(|| Fault("VSTPluginMain が無い".into()))?;
 
         // ホストへの呼び出し（audioMasterCallback）。opcode は 2 番目の引数（スタックの上から 2 つ目）
-        let host = emu.add_thunk(Box::new(|e: &mut Emu| {
+        let time = crate::timeinfo::alloc(&mut emu.mem)?;
+        let host = emu.add_thunk(Box::new(move |e: &mut Emu| {
             // audioMasterCallback(effect, opcode, index, value, ptr, opt) は cdecl。戻り先を pop した直後なので esp は effect を指す
             let esp = e.cpu.regs[crate::cpu::RSP];
             let opcode = e.mem.read_n(esp + 4, 4)?;
             if std::env::var("VSTBRIDGE_TRACE").is_ok() {
                 eprintln!("[audioMaster] opcode={opcode}");
             }
-            // 0=automate（画面でつまみを動かした。index と opt の値を記録して、ホストが音の側へ渡す）、1=version（2400）、ほかは 0
+            // 0=automate（画面でつまみを動かした。index と opt の値を記録して、ホストが音の側へ渡す）、1=version（2400）、7=getTime（VstTimeInfo）、ほかは 0
             if opcode == 0 {
                 let index = e.mem.read_n(esp + 8, 4)? as i32;
                 let value = f32::from_bits(e.mem.read_n(esp + 20, 4)? as u32);
                 e.gui.automation.push((index, value));
             }
-            Ok(if opcode == 1 { 2400 } else { 0 })
+            Ok(match opcode {
+                1 => 2400,
+                7 => time,
+                _ => 0,
+            })
         }));
 
         if img.entry != img.base {
@@ -90,7 +97,7 @@ impl Vst32 {
         let num_params = emu.mem.read_n(effect as u64 + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect as u64 + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect as u64 + off::NUM_OUTPUTS, 4)? as i32;
-        let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs, base: img.base as u32, io: None, events: 0 };
+        let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs, base: img.base as u32, io: None, events: 0, time };
         // ホストが普通に行う初期化（開く、サンプルレート、ブロックサイズ、電源オン）。これをしないと内部バッファが未初期化のまま
         v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_PROGRAM, 0, 0, 0, 0.0)?;
@@ -196,6 +203,7 @@ impl Vst32 {
             return Err(Fault("processReplacing が無い".into()));
         }
         self.emu.call32(process, &[Arg::Int(self.effect as u64), Arg::Int(in_ptrs as u64), Arg::Int(out_ptrs as u64), Arg::Int(frames as u64)])?;
+        crate::timeinfo::advance(&mut self.emu.mem, self.time, frames)?;
         let mut out = Vec::with_capacity(no);
         for buf in out_bufs {
             out.push(self.emu.mem.read_f32s(buf as u64, frames)?);

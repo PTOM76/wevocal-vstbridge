@@ -33,6 +33,8 @@ pub struct Vst {
     pub num_outputs: i32,
     /// 音を通すときのバッファ（ブロックごとに確保し直さない）
     io: Option<Io>,
+    /// audioMasterGetTime に返す VstTimeInfo の番地（process のたびに位置を進める）
+    time: u64,
     /// effProcessEvents に渡す VstEvents と VstMidiEvent 1 つ（最初に送るときに確保する）
     events: u64,
 }
@@ -56,10 +58,15 @@ impl Vst {
         pe::patch_imports(&mut emu, dll, img.base, crate::host_stubs::resolve, crate::host_stubs::unknown)?;
         let entry = img.export("VSTPluginMain").or_else(|| img.export("main")).ok_or_else(|| Fault("VSTPluginMain が無い".into()))?;
 
-        // ホストへの呼び出し（audioMasterCallback）。opcode は rdx（第 2 引数）。audioMasterVersion(1) には 2400 を返す
-        let host = emu.add_thunk(Box::new(|e: &mut Emu| {
+        // ホストへの呼び出し（audioMasterCallback）。opcode は rdx（第 2 引数）。audioMasterVersion(1) には 2400、audioMasterGetTime(7) には VstTimeInfo を返す
+        let time = crate::timeinfo::alloc(&mut emu.mem)?;
+        let host = emu.add_thunk(Box::new(move |e: &mut Emu| {
             let opcode = e.cpu.regs[2]; // rdx
-            Ok(if opcode == 1 { 2400 } else { 0 })
+            Ok(match opcode {
+                1 => 2400,
+                7 => time,
+                _ => 0,
+            })
         }));
 
         // TLS の領域を作り、コールバックを DllMain と同じ引数で呼ぶ
@@ -82,7 +89,7 @@ impl Vst {
         let num_params = emu.mem.read_n(effect + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect + off::NUM_OUTPUTS, 4)? as i32;
-        let mut v = Vst { emu, effect, num_params, num_inputs, num_outputs, io: None, events: 0 };
+        let mut v = Vst { emu, effect, num_params, num_inputs, num_outputs, io: None, events: 0, time };
         // ホストと同じ手順で使える状態にする（32 ビット版の vst32.rs と同じ。JUCE などは resume されるまで処理を始めない）
         v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 0, 48000.0)?;
@@ -200,6 +207,7 @@ impl Vst {
             return Err(Fault("processReplacing が無い".into()));
         }
         self.emu.call(process, &[Arg::Int(self.effect), Arg::Int(in_ptrs), Arg::Int(out_ptrs), Arg::Int(frames as u64)])?;
+        crate::timeinfo::advance(&mut self.emu.mem, self.time, frames)?;
         let mut out = Vec::with_capacity(no);
         for buf in out_bufs {
             out.push(self.emu.mem.read_f32s(buf, frames)?);

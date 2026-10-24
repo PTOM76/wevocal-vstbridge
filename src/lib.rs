@@ -19,6 +19,7 @@ pub mod pe32;
 pub mod rsrc;
 pub mod sse;
 pub mod sse2;
+pub mod timeinfo;
 pub mod vst;
 pub mod vst32;
 pub mod vst32_gui;
