@@ -20,6 +20,7 @@ const EFF_OPEN: u64 = 0;
 const EFF_SET_SAMPLE_RATE: u64 = 10;
 const EFF_SET_BLOCK_SIZE: u64 = 11;
 const EFF_MAINS_CHANGED: u64 = 12;
+const EFF_PROCESS_EVENTS: u64 = 25;
 const EFF_GET_PARAM_NAME: u64 = 8;
 const EFF_GET_EFFECT_NAME: u64 = 45;
 
@@ -32,6 +33,8 @@ pub struct Vst {
     pub num_outputs: i32,
     /// 音を通すときのバッファ（ブロックごとに確保し直さない）
     io: Option<Io>,
+    /// effProcessEvents に渡す VstEvents と VstMidiEvent 1 つ（最初に送るときに確保する）
+    events: u64,
 }
 
 struct Io {
@@ -79,7 +82,7 @@ impl Vst {
         let num_params = emu.mem.read_n(effect + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect + off::NUM_OUTPUTS, 4)? as i32;
-        let mut v = Vst { emu, effect, num_params, num_inputs, num_outputs, io: None };
+        let mut v = Vst { emu, effect, num_params, num_inputs, num_outputs, io: None, events: 0 };
         // ホストと同じ手順で使える状態にする（32 ビット版の vst32.rs と同じ。JUCE などは resume されるまで処理を始めない）
         v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_SAMPLE_RATE, 0, 0, 0, 48000.0)?;
@@ -137,6 +140,28 @@ impl Vst {
         let _ = self.emu.call(f, &[Arg::Int(self.effect), Arg::Int(index as u64)])?;
         // 戻り値は xmm0（f32）
         Ok(f32::from_bits(self.emu.cpu.xmm[0] as u32))
+    }
+
+    /// MIDI のメッセージ（3 バイト）を 1 つ送る（effProcessEvents）。delta はブロックの頭からのサンプル数
+    pub fn send_midi(&mut self, data: [u8; 3], delta: i32) -> R<()> {
+        // VstEvents（numEvents、reserved、events[2]）のあとに VstMidiEvent（32 バイト）を置く
+        let head = 24;
+        if self.events == 0 {
+            self.events = self.emu.mem.alloc(24 + 32);
+        }
+        let (ev, mid) = (self.events, self.events + head);
+        let mem = &mut self.emu.mem;
+        mem.write_n(ev, 4, 1)?;
+        mem.write_n(ev + 8, 8, 0)?;
+        mem.write_n(ev + 16, 8, mid)?;
+        let mut m = [0u8; 32];
+        m[0..4].copy_from_slice(&1i32.to_le_bytes());
+        m[4..8].copy_from_slice(&32i32.to_le_bytes());
+        m[8..12].copy_from_slice(&delta.to_le_bytes());
+        m[24..27].copy_from_slice(&data);
+        mem.write(mid, &m)?;
+        self.dispatch(EFF_PROCESS_EVENTS, 0, 0, ev, 0.0)?;
+        Ok(())
     }
 
     /// 音を通す（入力の各チャンネル → 出力の各チャンネル。processReplacing(effect, in**, out**, n)）

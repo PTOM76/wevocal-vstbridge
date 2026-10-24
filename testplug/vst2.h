@@ -45,8 +45,30 @@ enum {
   effSetSampleRate = 10,
   effSetBlockSize = 11,
   effMainsChanged = 12,
+  effProcessEvents = 25,
   effGetEffectName = 45,
 };
 
 /* flags */
-enum { effFlagsCanReplacing = 1 << 4 };
+enum { effFlagsCanReplacing = 1 << 4, effFlagsIsSynth = 1 << 8 };
+
+/* effProcessEvents で受け取る MIDI（使うものだけ） */
+enum { kVstMidiType = 1 };
+typedef struct {
+  int32_t type;
+  int32_t byteSize;
+  int32_t deltaFrames;
+  int32_t flags;
+  int32_t noteLength;
+  int32_t noteOffset;
+  char midiData[4];
+  char detune;
+  char noteOffVelocity;
+  char reserved1;
+  char reserved2;
+} VstMidiEvent;
+typedef struct {
+  int32_t numEvents;
+  intptr_t reserved;
+  VstMidiEvent *events[2];
+} VstEvents;

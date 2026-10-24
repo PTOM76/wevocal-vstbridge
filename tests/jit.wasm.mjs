@@ -22,12 +22,20 @@ function run(dll, jit) {
   if (process.env.DENY) v.setJitDeny(process.env.DENY)
   if (jit && process.env.MISSES) v.countJitMisses()
   const ins = Math.max(1, v.numInputs), params = v.numParams
+  // 入力が 0 の楽器には、ノートを送って音の処理を通す（50 ブロックごとに和音を変える）
+  const synth = v.numInputs === 0
+  let held = []
   const rnd = noise(1), knob = noise(2)
   const blocks = Math.floor((secs * 48000) / n)
   const out = []
   const t0 = performance.now()
   for (let b = 0; b < blocks; b++) {
     if (params && b % 50 === 0) v.setParam(Math.floor(((knob() + 1) / 2) * params) % params, (knob() + 1) / 2)
+    if (synth && b % 50 === 0) {
+      for (const k of held) v.sendMidi(0x80, k, 0, 0)
+      held = [0, 1, 2].map(() => 48 + Math.floor(((knob() + 1) / 2) * 36))
+      for (const k of held) v.sendMidi(0x90, k, 100, 0)
+    }
     const input = Array.from({ length: ins }, () => Float32Array.from({ length: n }, () => rnd() * 0.5))
     for (const ch of v.process(input, n)) out.push(new Uint32Array(ch.buffer.slice(0)))
   }

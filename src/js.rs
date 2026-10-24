@@ -150,6 +150,16 @@ impl JsVst {
         .map_err(|e| JsError::new(&e.0))
     }
 
+    /// MIDI のメッセージ（status、data1、data2）を送る。次の process のブロックの頭から delta サンプル目に効く
+    #[wasm_bindgen(js_name = sendMidi)]
+    pub fn send_midi(&mut self, status: u8, data1: u8, data2: u8, delta: i32) -> Result<(), JsError> {
+        match &mut self.0 {
+            Plugin::X64(v) => v.send_midi([status, data1, data2], delta),
+            Plugin::X86(v) => v.send_midi([status, data1, data2], delta),
+        }
+        .map_err(|e| JsError::new(&e.0))
+    }
+
     /// 入力（チャンネルごとの Float32Array を並べた配列）を通し、出力（同じ形）を返す
     pub fn process(&mut self, input: Vec<js_sys::Float32Array>, frames: usize) -> Result<Vec<js_sys::Float32Array>, JsError> {
         let input: Vec<Vec<f32>> = input.iter().map(|a| a.to_vec()).collect();

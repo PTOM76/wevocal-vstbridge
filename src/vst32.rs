@@ -24,6 +24,7 @@ const EFF_SET_PROGRAM: u64 = 2;
 const EFF_SET_SAMPLE_RATE: u64 = 10;
 const EFF_SET_BLOCK_SIZE: u64 = 11;
 const EFF_MAINS_CHANGED: u64 = 12;
+const EFF_PROCESS_EVENTS: u64 = 25;
 const EFF_GET_PARAM_NAME: u64 = 8;
 const EFF_GET_EFFECT_NAME: u64 = 45;
 
@@ -37,6 +38,8 @@ pub struct Vst32 {
     pub base: u32,
     /// 音を通すときのバッファ（ブロックごとに確保し直さない。メモリが増え続けるため）
     io: Option<Io>,
+    /// effProcessEvents に渡す VstEvents と VstMidiEvent 1 つ（最初に送るときに確保する）
+    events: u64,
 }
 
 /// processReplacing に渡すバッファの番地
@@ -87,7 +90,7 @@ impl Vst32 {
         let num_params = emu.mem.read_n(effect as u64 + off::NUM_PARAMS, 4)? as i32;
         let num_inputs = emu.mem.read_n(effect as u64 + off::NUM_INPUTS, 4)? as i32;
         let num_outputs = emu.mem.read_n(effect as u64 + off::NUM_OUTPUTS, 4)? as i32;
-        let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs, base: img.base as u32, io: None };
+        let mut v = Vst32 { emu, effect, num_params, num_inputs, num_outputs, base: img.base as u32, io: None, events: 0 };
         // ホストが普通に行う初期化（開く、サンプルレート、ブロックサイズ、電源オン）。これをしないと内部バッファが未初期化のまま
         v.dispatch(EFF_OPEN, 0, 0, 0, 0.0)?;
         v.dispatch(EFF_SET_PROGRAM, 0, 0, 0, 0.0)?;
@@ -133,6 +136,28 @@ impl Vst32 {
         self.emu.call32(f, &[Arg::Int(self.effect as u64), Arg::Int(index as u64)])?;
         // 32 ビットの VST は戻り値の f32 を x87 の st(0) で返す
         Ok(self.emu.cpu.st(0) as f32)
+    }
+
+    /// MIDI のメッセージ（3 バイト）を 1 つ送る（effProcessEvents）。delta はブロックの頭からのサンプル数
+    pub fn send_midi(&mut self, data: [u8; 3], delta: i32) -> R<()> {
+        // VstEvents（numEvents、reserved、events[2]）のあとに VstMidiEvent（32 バイト）を置く
+        let head = 12;
+        if self.events == 0 {
+            self.events = self.emu.mem.alloc32(12 + 32) as u64;
+        }
+        let (ev, mid) = (self.events, self.events + head);
+        let mem = &mut self.emu.mem;
+        mem.write_n(ev, 4, 1)?;
+        mem.write_n(ev + 4, 4, 0)?;
+        mem.write_n(ev + 8, 4, mid)?;
+        let mut m = [0u8; 32];
+        m[0..4].copy_from_slice(&1i32.to_le_bytes());
+        m[4..8].copy_from_slice(&32i32.to_le_bytes());
+        m[8..12].copy_from_slice(&delta.to_le_bytes());
+        m[24..27].copy_from_slice(&data);
+        mem.write(mid, &m)?;
+        self.dispatch(EFF_PROCESS_EVENTS, 0, 0, ev, 0.0)?;
+        Ok(())
     }
 
     /// 音を通す（processReplacing(effect, in**, out**, n)）。ポインターは 4 バイト
