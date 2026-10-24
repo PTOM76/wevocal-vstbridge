@@ -102,7 +102,7 @@ struct Asm {
     body: Vec<W<'static>>,
     off: Off,
     pages_ptr: u32,
-    /// code_pages の先頭（ホストの番地）
+    /// 書き込み用のページ表（Memory::pages_w）の先頭（ホストの番地）
     code_ptr: u32,
     bits: u32,
     /// 今の命令で実際に書くフラグ（使われるもの）だけのビット。CF=1,ZF=2,SF=4,OF=8,PF=16
@@ -210,47 +210,30 @@ impl Asm {
     }
     /// GA のページを引いてホストの番地を HP に入れる。引けなければ中断（bail）。insn_addr と count は中断時に使う
     fn resolve_ptr(&mut self, size: usize, insn_addr: u64, count: u32) {
-        // page = load32(pages_ptr + (GA>>12)*4)
-        self.body.push(W::LocalGet(GA));
-        self.body.push(W::I32Const(12));
-        self.body.push(W::I32ShrU);
-        self.body.push(W::I32Const(4));
-        self.body.push(W::I32Mul);
-        self.body.push(W::I32Const(self.pages_ptr as i32));
-        self.body.push(W::I32Add);
-        self.body.push(W::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }));
-        self.body.push(W::LocalTee(HP));
-        // page==0 か、ページの終わりをまたぐか
-        self.body.push(W::I32Eqz);
-        self.body.push(W::LocalGet(GA));
-        self.body.push(W::I32Const(0xfff));
-        self.body.push(W::I32And);
-        self.body.push(W::I32Const(size as i32));
-        self.body.push(W::I32Add);
-        self.body.push(W::I32Const(4096));
-        self.body.push(W::I32GtU);
-        self.body.push(W::I32Or);
+        self.resolve_in(self.pages_ptr, size, insn_addr, count);
+    }
+    /// table（pages か pages_w）で GA のページを引き、ホストの番地を HP に入れる。引けないか、ページの終わりをまたげば中断
+    fn resolve_in(&mut self, table: u32, size: usize, insn_addr: u64, count: u32) {
+        // HP = load32(table + (GA >> 12) * 4)。表の番地は読み込みの offset に入れる
+        self.body.extend([W::LocalGet(GA), W::I32Const(12), W::I32ShrU, W::I32Const(2), W::I32Shl]);
+        self.body.push(W::I32Load(MemArg { offset: table as u64, align: 2, memory_index: 0 }));
+        self.body.extend([W::LocalTee(HP), W::I32Eqz]);
+        // 1 バイトはページをまたがない
+        if size > 1 {
+            self.body.extend([W::LocalGet(GA), W::I32Const(0xfff), W::I32And, W::I32Const((4096 - size) as i32), W::I32GtU, W::I32Or]);
+        }
         self.body.push(W::If(BlockType::Empty));
         self.emit_bail(insn_addr, count);
         self.body.push(W::End);
         // HP = HP + (GA & 0xfff)
-        self.body.push(W::LocalGet(HP));
-        self.body.push(W::LocalGet(GA));
-        self.body.push(W::I32Const(0xfff));
-        self.body.push(W::I32And);
-        self.body.push(W::I32Add);
-        self.body.push(W::LocalSet(HP));
+        self.body.extend([W::LocalGet(HP), W::LocalGet(GA), W::I32Const(0xfff), W::I32And, W::I32Add, W::LocalSet(HP)]);
     }
-    /// GA から size バイトの、先頭と終わりのページが引けるか（write なら、命令のあるページでないか）を確かめ、だめなら中断する。ページをまたぐ読み書きを遅い道でするときに使う
+    /// GA から size バイトの、先頭と終わりのページが引けるか（write なら書き込み用の表で、命令のあるページでないか）を確かめ、だめなら中断する。ページをまたぐ読み書きを遅い道でするときに使う
     fn check_pages(&mut self, size: usize, write: bool, insn_addr: u64, count: u32) {
+        let table = if write { self.code_ptr } else { self.pages_ptr };
         for add in [0, size as i32 - 1] {
-            self.body.extend([W::LocalGet(GA), W::I32Const(add), W::I32Add, W::I32Const(12), W::I32ShrU, W::LocalSet(HP)]);
-            self.body.extend([W::LocalGet(HP), W::I32Const(2), W::I32Shl, W::I32Const(self.pages_ptr as i32), W::I32Add]);
-            self.body.extend([W::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }), W::I32Eqz]);
-            if write {
-                self.body.extend([W::LocalGet(HP), W::I32Const(3), W::I32Shl, W::I32Const(self.code_ptr as i32), W::I32Add]);
-                self.body.extend([W::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }), W::I64Const(0), W::I64Ne, W::I32Or]);
-            }
+            self.body.extend([W::LocalGet(GA), W::I32Const(add), W::I32Add, W::I32Const(12), W::I32ShrU, W::I32Const(2), W::I32Shl]);
+            self.body.extend([W::I32Load(MemArg { offset: table as u64, align: 2, memory_index: 0 }), W::I32Eqz]);
             self.body.push(W::If(BlockType::Empty));
             self.emit_bail(insn_addr, count);
             self.body.push(W::End);
@@ -293,20 +276,8 @@ impl Asm {
     /// 書き込み用の resolve_ptr。命令として読んだ 64 バイトがあるページへの書き込みは中断して、インタープリターに任せる
     /// （インタープリターの書き込みが code_dirty を立て、デコード済みの命令と JIT の関数を捨てる）
     fn resolve_ptr_w(&mut self, size: usize, insn_addr: u64, count: u32) {
-        self.resolve_ptr(size, insn_addr, count);
-        self.body.push(W::LocalGet(GA));
-        self.body.push(W::I32Const(12));
-        self.body.push(W::I32ShrU);
-        self.body.push(W::I32Const(3));
-        self.body.push(W::I32Shl);
-        self.body.push(W::I32Const(self.code_ptr as i32));
-        self.body.push(W::I32Add);
-        self.body.push(W::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }));
-        self.body.push(W::I64Const(0));
-        self.body.push(W::I64Ne);
-        self.body.push(W::If(BlockType::Empty));
-        self.emit_bail(insn_addr, count);
-        self.body.push(W::End);
+        // 書き込み用の表は、命令のあるページが 0 なので、引けなければ中断する（インタープリターの書き込みが code_dirty を立てる）
+        self.resolve_in(self.code_ptr, size, insn_addr, count);
     }
     /// rip を v にして、count を積んで返す
     fn emit_exit(&mut self, v: u64, count: u32) {

@@ -49,6 +49,8 @@ pub struct Memory {
     pages: Vec<usize>,
     /// ページごとの、命令として読まれた 64 バイトのブロック（1 ビット 1 ブロック。近道の書き込みで、デコード済みの命令を捨てる合図に使う）
     code_pages: Vec<std::cell::Cell<u64>>,
+    /// 書き込み用のページ表（pages と同じ。ただし命令として読まれたページは 0。JIT の書き込みが 1 回引くだけで済むように）
+    pages_w: Vec<std::cell::Cell<usize>>,
     /// VSTBRIDGE_OOB のとき、要求サイズを見張る領域は近道に入れない
     watch_oob: bool,
     /// 命令として読まれた領域へ書き込みがあった（デコード済みの命令を捨てる合図。Emu が読んで戻す）
@@ -62,7 +64,7 @@ pub const HEAP_BASE_32: u64 = 0x6000_0000;
 
 impl Memory {
     pub fn new() -> Self {
-        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32, last_data: Default::default(), last_code: Default::default(), order: Vec::new(), arena_end: 0, pages: vec![0; PAGES], code_pages: vec![Default::default(); PAGES], watch_oob: std::env::var("VSTBRIDGE_OOB").is_ok(), code_dirty: false }
+        Memory { regions: Vec::new(), heap_next: HEAP_BASE, heap_next32: HEAP_BASE_32, last_data: Default::default(), last_code: Default::default(), order: Vec::new(), arena_end: 0, pages: vec![0; PAGES], code_pages: vec![Default::default(); PAGES], pages_w: vec![Default::default(); PAGES], watch_oob: std::env::var("VSTBRIDGE_OOB").is_ok(), code_dirty: false }
     }
 
     /// start から size バイトを 0 で割り当てる
@@ -90,6 +92,9 @@ impl Memory {
             let slot = &mut self.pages[pg as usize];
             if *slot == 0 {
                 *slot = r.data.as_ptr() as usize + ((pg << PAGE_BITS) - r.start) as usize;
+                if self.code_pages[pg as usize].get() == 0 {
+                    self.pages_w[pg as usize].set(*slot);
+                }
             }
         }
     }
@@ -236,6 +241,11 @@ impl Memory {
         self.code_pages.as_ptr() as usize as u32
     }
 
+    /// pages_w の先頭（ホストの番地。JIT の書き込みが引く）
+    pub fn pages_w_ptr(&self) -> u32 {
+        self.pages_w.as_ptr() as usize as u32
+    }
+
     /// 命令を読むための、addr から読めるだけ（最大 len）の写し
     pub fn fetch(&self, addr: u64, len: usize) -> R<&[u8]> {
         if addr >> 32 == 0 {
@@ -243,9 +253,11 @@ impl Memory {
             let off = (addr & (PAGE as u64 - 1)) as usize;
             let c = &self.code_pages[first];
             c.set(c.get() | block_mask(off, len.min(PAGE - off)));
+            self.pages_w[first].set(0);
             if off + len > PAGE && first + 1 < PAGES {
                 let c = &self.code_pages[first + 1];
                 c.set(c.get() | block_mask(0, off + len - PAGE));
+                self.pages_w[first + 1].set(0);
             }
         }
         fn slice(r: &Region, addr: u64, len: usize) -> &[u8] {
