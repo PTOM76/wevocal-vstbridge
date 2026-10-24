@@ -18,8 +18,24 @@ pub fn install(bytes: &[u8]) -> Result<JitFn, String> {
     Reflect::set(&imports, &"env".into(), &env).map_err(err)?;
     let inst = WebAssembly::Instance::new(&module, &imports).map_err(err)?;
     let f = Reflect::get(&inst.exports(), &"f".into()).map_err(err)?;
-    let idx = table.grow(1).map_err(err)?;
+    let idx = next_slot(&table).map_err(err)?;
     table.set(idx, f.unchecked_ref()).map_err(err)?;
     // SAFETY: wasm32 の関数ポインターは関数の表の添字。f の型は (i32) -> i32 で JitFn と同じ
     Ok(unsafe { std::mem::transmute::<usize, JitFn>(idx as usize) })
+}
+
+thread_local! {
+    /// 表の空いている場所（次の添字と、広げた範囲の終わり）
+    static SLOTS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// 表の空いている場所を 1 つ返す。足りなければ 256 個まとめて広げる（1 個ずつ広げると、そのたびに写し直しになる）
+fn next_slot(table: &WebAssembly::Table) -> Result<u32, JsValue> {
+    let (mut next, mut end) = SLOTS.get();
+    if next == end {
+        next = table.grow(256)?;
+        end = next + 256;
+    }
+    SLOTS.set((next + 1, end));
+    Ok(next)
 }

@@ -89,14 +89,14 @@ impl JsVst {
         }
     }
 
-    /// 変換した関数の数と、変換にかかった時間（"数 ms"。調査用）
+    /// 変換した関数の数、変換にかかった時間、生成した wasm の合計（"数 ms バイト"。調査用）
     #[wasm_bindgen(js_name = jitStats)]
     pub fn jit_stats(&self) -> String {
         let j = match &self.0 {
             Plugin::X86(v) => &v.emu.jit,
             Plugin::X64(v) => &v.emu.jit,
         };
-        format!("{} {:.0}", j.compiled, j.compile_ms)
+        format!("{} {:.0} {}", j.compiled, j.compile_ms, j.compiled_bytes)
     }
 
     /// JIT を使うか（ありとなしで出力を比べるため。既定は使う）

@@ -181,8 +181,8 @@ fn emit_flow(asm: &mut Asm, idx: &[u64], rets: &[u64], table: &[u64], i: &Instru
 }
 
 /// start から、分岐でつながるブロックをまとめて変換する。先頭のブロックが作れないときは None
-/// regs は変換するときのレジスタ（switch の表の場所の手がかり）
-pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs: &[u64; 16]) -> Option<Compiled> {
+/// regs は変換するときのレジスタ（switch の表の場所の手がかり）。covered はほかの関数にもう入っているブロック（入れずに、そこへ移る出口にする）
+pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs: &[u64; 16], covered: &dyn Fn(u64) -> bool) -> Option<Compiled> {
     // 分岐の先を幅優先でたどって集める（call、ret、間接の分岐の先はたどらない）
     let mut addrs = vec![start];
     let mut blocks: Vec<Option<Block>> = Vec::new();
@@ -202,7 +202,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs
                 _ => b.table.clone(),
             };
             for t in next {
-                if addrs.len() < MAX_BLOCKS && total < MAX_INSNS && !addrs.contains(&t) {
+                if addrs.len() < MAX_BLOCKS && total < MAX_INSNS && !addrs.contains(&t) && !covered(t) {
                     addrs.push(t);
                 }
             }

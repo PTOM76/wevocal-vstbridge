@@ -5,8 +5,10 @@ pub mod install;
 
 use wasm_encoder::{CodeSection, EntityType, ExportKind, ExportSection, Function, FunctionSection, ImportSection, Instruction as W, MemoryType, Module, RefType, TableType, TypeSection, ValType};
 
-/// 1 つの関数 "f"（(i32) -> i32）だけを書き出すモジュールを作る。memory と table を env から import する
+/// 1 つの関数 "f"（(i32) -> i32）だけを書き出すモジュールを作る。memory と（遅い道を呼ぶときだけ）table を env から import する
+/// （table を import したインスタンスは、表を変えるたびに V8 が更新するので、要らなければ import しない）
 pub fn module(locals: &[(u32, ValType)], body: &[W]) -> Vec<u8> {
+    let uses_table = body.iter().any(|w| matches!(w, W::CallIndirect { .. }));
     let mut m = Module::new();
     let mut types = TypeSection::new();
     types.ty().function([ValType::I32], [ValType::I32]);
@@ -15,7 +17,9 @@ pub fn module(locals: &[(u32, ValType)], body: &[W]) -> Vec<u8> {
     m.section(&types);
     let mut imports = ImportSection::new();
     imports.import("env", "memory", EntityType::Memory(MemoryType { minimum: 1, maximum: None, memory64: false, shared: false, page_size_log2: None }));
-    imports.import("env", "table", EntityType::Table(TableType { element_type: RefType::FUNCREF, minimum: 1, maximum: None, table64: false, shared: false }));
+    if uses_table {
+        imports.import("env", "table", EntityType::Table(TableType { element_type: RefType::FUNCREF, minimum: 1, maximum: None, table64: false, shared: false }));
+    }
     m.section(&imports);
     let mut funcs = FunctionSection::new();
     funcs.function(0);
@@ -99,6 +103,8 @@ pub struct Jit {
     /// 変換した関数の数と、変換にかかった時間（ms。調査用）
     pub compiled: u32,
     pub compile_ms: f64,
+    /// 生成した wasm の合計のバイト数（調査用）
+    pub compiled_bytes: u64,
     pub on: bool,
     /// インタープリターで動かした命令を jit_miss に数えるか（調査用。数えると遅くなる）
     pub count_miss: bool,
@@ -113,6 +119,7 @@ impl Default for Jit {
             hits: Default::default(),
             threshold,
             compiled: 0,
+            compiled_bytes: 0,
             compile_ms: 0.0,
             on: std::env::var("VSTBRIDGE_NOJIT").is_err(),
             count_miss: false,
@@ -141,9 +148,12 @@ impl Jit {
             return None;
         }
         let t0 = js_sys::Date::now();
-        let c = codegen::compile_block(mem, bits, rip, max_block, regs);
+        let funcs = &self.funcs;
+        let c = codegen::compile_block(mem, bits, rip, max_block, regs, &|a| matches!(funcs.get(&a), Some(Some(_))));
         let entries = c.as_ref().map(|c| c.entries.clone()).unwrap_or_default();
-        let f = c.and_then(|c| install::install(&module(&c.locals, &c.body)).ok());
+        let bytes = c.map(|c| module(&c.locals, &c.body));
+        self.compiled_bytes += bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+        let f = bytes.and_then(|b| install::install(&b).ok());
         self.compiled += f.is_some() as u32;
         self.compile_ms += js_sys::Date::now() - t0;
         // まとめた中のほかのブロックも、まだ関数がなければこの関数の途中から入る
