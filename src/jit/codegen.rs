@@ -27,6 +27,8 @@ const X0: u32 = 14; // i64 作業用（64 ビットの積の上位など）
 const X1: u32 = 15;
 const V0: u32 = 16; // v128 作業用
 const V1: u32 = 17;
+/// 汎用レジスタの写し（16 個）。ブロックの中で読んだものを置き、書くときは写しとメモリの両方に書く
+const GR0: u32 = 18;
 /// ループを回す命令の数の上限（これを超えたら抜けて、命令数の見張りに戻す）
 const LOOP_LIMIT: i32 = 100_000;
 
@@ -109,6 +111,8 @@ struct Asm {
     fpu: bool,
     /// ブロックの頭からの x87 のスタックの先頭のずれ（積むと 1 減る。変換するときに数える）
     fdelta: i32,
+    /// 写し（GR0 + 添字）が今の値を持っている汎用レジスタ（ビット）。命令の頭でだけ増やし、Rust の関数を呼んだら捨てる
+    cached: u16,
 }
 const FCF: u8 = 1;
 const FZF: u8 = 2;
@@ -124,8 +128,12 @@ impl Asm {
     }
     /// レジスタ idx の 64 ビットを積む
     fn load_reg(&mut self, idx: usize) {
-        self.cpu();
-        self.body.push(W::I64Load(MemArg { offset: off_reg(idx % HI), align: 3, memory_index: 0 }));
+        if self.cached >> (idx % HI) & 1 == 1 {
+            self.body.push(W::LocalGet(GR0 + (idx % HI) as u32));
+        } else {
+            self.cpu();
+            self.body.push(W::I64Load(MemArg { offset: off_reg(idx % HI), align: 3, memory_index: 0 }));
+        }
         if idx >= HI {
             self.body.extend([W::I64Const(8), W::I64ShrU]);
         }
@@ -139,7 +147,7 @@ impl Asm {
             // ビット 8〜15 だけを書き換える
             self.load_reg(idx % HI);
             self.body.extend([W::I64Const(!0xff00), W::I64And, W::LocalGet(R), W::I64Const(0xff), W::I64And, W::I64Const(8), W::I64Shl, W::I64Or]);
-            self.body.push(W::I64Store(MemArg { offset: off_reg(idx % HI), align: 3, memory_index: 0 }));
+            self.store_reg_mem(idx % HI);
             return;
         }
         match size {
@@ -160,7 +168,26 @@ impl Asm {
                 self.body.push(W::I64Or);
             }
         }
+        self.store_reg_mem(idx);
+    }
+    /// スタックの [cpu, 値] をレジスタ idx（0〜15）のメモリに書く。写しがあれば写しにも書く
+    fn store_reg_mem(&mut self, idx: usize) {
+        if self.cached >> idx & 1 == 1 {
+            self.body.push(W::LocalTee(GR0 + idx as u32));
+        }
         self.body.push(W::I64Store(MemArg { offset: off_reg(idx), align: 3, memory_index: 0 }));
+    }
+    /// 命令の頭で、使う汎用レジスタを写しに読んでおく（分岐の中で写しを作らないよう、命令の頭でだけ増やす）
+    fn preload_regs(&mut self, i: &Instruction) {
+        let mut f = iced_x86::InstructionInfoFactory::new();
+        for u in f.info(i).used_registers() {
+            let Some((idx, _)) = gpr(u.register().full_register()) else { continue };
+            if self.cached >> idx & 1 == 0 {
+                self.cpu();
+                self.body.extend([W::I64Load(MemArg { offset: off_reg(idx), align: 3, memory_index: 0 }), W::LocalSet(GR0 + idx as u32)]);
+                self.cached |= 1 << idx;
+            }
+        }
     }
     /// ゲストの番地（i32）を GA に計算して積む
     fn calc_addr(&mut self, mo: &Mem) {
@@ -233,6 +260,8 @@ impl Asm {
     fn call_helper(&mut self, f: usize, arg: W<'static>) {
         self.cpu();
         self.body.extend([arg, W::I32Const(f as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
+        // Rust の関数はレジスタを書き換えることがある（div128）
+        self.cached = 0;
     }
     /// x87 のスタックの先頭と深さを、今のずれで書き戻す（ブロックから抜ける所で）
     fn fpu_sync(&mut self) {
@@ -1117,7 +1146,7 @@ fn insn_flags(i: &Instruction) -> Option<u8> {
 }
 
 fn finish(asm: Asm) -> Compiled {
-    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (4, ValType::I32), (2, ValType::I64), (2, ValType::V128)], body: asm.body, entries: Vec::new() }
+    Compiled { locals: vec![(3, ValType::I64), (2, ValType::I32), (2, ValType::F32), (2, ValType::F64), (4, ValType::I32), (2, ValType::I64), (2, ValType::V128), (16, ValType::I64)], body: asm.body, entries: Vec::new() }
 }
 
 fn is_jcc(i: &Instruction) -> bool {

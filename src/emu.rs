@@ -58,6 +58,8 @@ pub struct Emu {
     pub procs: HashMap<(String, String), u64>,
     /// ホストのヒープで確保したブロックの大きさ（番地 → バイト数）。HeapReAlloc で中身を写すために覚える
     pub heap_sizes: HashMap<u64, usize>,
+    /// HeapFree で返された領域（16 バイトにそろえた大きさ → 番地）。同じ大きさの HeapAlloc で使い回す
+    pub heap_free: HashMap<usize, Vec<u64>>,
     /// 読み込んだ DLL の番地（GetModuleHandle(NULL) などで返す。0 なら 32 ビットの既定）
     pub image_base: u64,
     /// 1 回の呼び出しの命令数の上限（無限ループで止まらないように）
@@ -79,6 +81,8 @@ pub struct Emu {
     pub(crate) blocks: crate::blocks::Blocks,
     pub jit: crate::jit::Jit,
     pub jit_insns: u64,
+    /// JIT の関数を呼んだ回数（1 回で動く命令の数を見るため。調査用）
+    pub jit_calls: u64,
     /// JIT が有効なのにインタープリターで動かしたブロックの先頭の命令（名前 → 回数。調査用）
     pub jit_miss: HashMap<String, u64>,
     pub interp_insns: u64,
@@ -89,6 +93,30 @@ pub struct Emu {
 }
 
 impl Emu {
+    /// プラグインのヒープから size バイトを確保する。返された領域があれば使い回す（zero なら 0 で埋める）
+    pub fn heap_alloc(&mut self, size: usize, zero: bool) -> R<u64> {
+        let class = (size.max(1) + 15) & !15;
+        let at = match self.heap_free.get_mut(&class).and_then(|v| v.pop()) {
+            Some(p) => {
+                if zero {
+                    self.mem.write(p, &vec![0u8; class])?;
+                }
+                p
+            }
+            // 新しい領域は 0 になっている
+            None => self.mem.alloc32(class) as u64,
+        };
+        self.heap_sizes.insert(at, size);
+        Ok(at)
+    }
+
+    /// heap_alloc で確保した領域を返す。確保していないものなら false
+    pub fn heap_free(&mut self, ptr: u64) -> bool {
+        let Some(size) = self.heap_sizes.remove(&ptr) else { return false };
+        self.heap_free.entry((size.max(1) + 15) & !15).or_default().push(ptr);
+        true
+    }
+
     /// 64 ビットの DLL（x64）を動かすための空の状態
     pub fn new() -> Self {
         Self::with_bits(64)
@@ -127,7 +155,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x1020, 8, teb + 0x1800);
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, threads: Default::default(), trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), heap_free: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, threads: Default::default(), trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_calls: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）

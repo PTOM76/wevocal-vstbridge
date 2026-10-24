@@ -53,7 +53,7 @@ for (const path of paths) {
     let diff = -1
     for (let k = 0; k < a.out.length && diff < 0; k++) for (let j = 0; j < a.out[k].length; j++) if (a.out[k][j] !== b.out[k][j]) { diff = k; break }
     if (diff >= 0) failed++
-    console.log(`${diff < 0 ? 'ok  ' : 'NG  '}${name}: なし ${a.ms.toFixed(0)} ms、あり ${b.ms.toFixed(0)} ms（${(a.ms / b.ms).toFixed(2)} 倍）、JIT の命令 ${(b.coverage * 100).toFixed(0)}%、変換 ${b.stats[0]} 個 ${b.stats[1]} ms ${(b.stats[2] / 1e6).toFixed(1)} MB${diff >= 0 ? `、最初の違い ${diff} 番目の塊` : ''}`)
+    console.log(`${diff < 0 ? 'ok  ' : 'NG  '}${name}: なし ${a.ms.toFixed(0)} ms、あり ${b.ms.toFixed(0)} ms（${(a.ms / b.ms).toFixed(2)} 倍）、JIT の命令 ${(b.coverage * 100).toFixed(0)}%、変換 ${b.stats[0]} 個 ${b.stats[1]} ms ${(b.stats[2] / 1e6).toFixed(1)} MB、呼び出し ${b.stats[3]} 回（1 回 ${(b.stats[4] / b.stats[3]).toFixed(0)} 命令）${diff >= 0 ? `、最初の違い ${diff} 番目の塊` : ''}`)
     // MISSES=1 なら、JIT で動かせなかったブロックの先頭の命令を多い順に表示する
     if (process.env.MISSES) console.log(b.misses.replace(/^/gm, '    '))
   } catch (e) {

@@ -44,7 +44,7 @@ impl Asm {
     fn set_rsp_from(&mut self, local: u32) {
         self.cpu();
         self.body.push(W::LocalGet(local));
-        self.body.push(W::I64Store(MemArg { offset: off_reg(4), align: 3, memory_index: 0 }));
+        self.store_reg_mem(4);
     }
     /// B の値を積む（rsp - w に書いて rsp を下げる）。番地が引けなければ、何も変えずに中断
     pub(super) fn push_b(&mut self, w: usize, insn_addr: u64, count: u32) {

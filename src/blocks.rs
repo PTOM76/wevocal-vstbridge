@@ -145,6 +145,7 @@ impl Emu {
                     let n = f(cpu_ptr);
                     self.cpu.steps += n as u64;
                     self.jit_insns += n as u64;
+                    self.jit_calls += 1;
                     if self.cpu.jit_bail != 0 {
                         // メモリの遅い道。その 1 命令だけインタープリターで進める
                         self.cpu.jit_bail = 0;

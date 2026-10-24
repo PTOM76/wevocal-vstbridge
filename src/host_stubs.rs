@@ -236,10 +236,9 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
         // Windows XP（5.1）を名乗る。下位 16 ビットが版（上位バイトが minor、下位バイトが major）、上位 16 ビットがビルド番号
         ("KERNEL32.DLL", "GetVersion") => Some(Box::new(|_e: &mut Emu| -> R<u64> { Ok(0x0A28_0105) })),
         ("KERNEL32.DLL", "HeapAlloc") => Some(Box::new(|e: &mut Emu| -> R<u64> {
-            // HeapAlloc(hHeap, flags, size)。要る分だけ確保して返す（HEAP_ZERO_MEMORY は、新しい領域が 0 なのでそのまま）
+            // HeapAlloc(hHeap, flags, size)。返された同じ大きさの領域があれば使い回す（HEAP_ZERO_MEMORY=8 なら 0 で埋める）
             let size = arg(e, 3)? as u32 as usize;
-            let at = e.mem.alloc32(size);
-            e.heap_sizes.insert(at as u64, size);
+            let at = e.heap_alloc(size, arg(e, 2)? & 8 != 0)?;
             if std::env::var("VSTBRIDGE_HEAP").is_ok() {
                 eprintln!("[heap] HeapAlloc {size} バイト → {at:#x}");
             }
@@ -249,21 +248,21 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
             // HeapReAlloc(hHeap, flags, ptr, size)。新しく確保して、古い中身を写す
             let old = arg(e, 3)?;
             let size = arg(e, 4)? as u32 as usize;
-            let at = e.mem.alloc32(size);
             let n = e.heap_sizes.get(&old).copied().unwrap_or(0).min(size);
+            let at = e.heap_alloc(size, arg(e, 2)? & 8 != 0)?;
             if n > 0 {
                 let mut buf = vec![0u8; n];
                 e.mem.read(old, &mut buf)?;
-                e.mem.write(at as u64, &buf)?;
+                e.mem.write(at, &buf)?;
             }
-            e.heap_sizes.insert(at as u64, size);
-            Ok(at as u64)
+            e.heap_free(old);
+            Ok(at)
         })),
         ("KERNEL32.DLL", "HeapFree") => Some(Box::new(|e: &mut Emu| -> R<u64> {
             // HeapFree(hHeap, flags, ptr)。確保していないポインター、二重の解放を報告する（本物の Windows はヒープの破壊として終了する。調査用 VSTBRIDGE_HEAP=1）
             let ptr = arg(e, 3)?;
             if ptr != 0 {
-                let known = e.heap_sizes.remove(&ptr).is_some();
+                let known = e.heap_free(ptr);
                 if !known && std::env::var("VSTBRIDGE_HEAP").is_ok() {
                     eprintln!("[heap] HeapFree: 確保していない、または解放済みのポインター {ptr:#x}");
                 }

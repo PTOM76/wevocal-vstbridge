@@ -115,10 +115,14 @@ fn emit_body(asm: &mut Asm, b: &Block) -> Option<()> {
         live[k] = f.emit & need;
         need = (need & !f.kill) | f.read;
     }
+    // 写しはブロックの中だけで使う（ブロックの入口はいろいろな所から来る。終わりの分岐はメモリを読む）
+    asm.cached = 0;
     for (k, insn) in b.insns.iter().enumerate() {
         asm.flag_mask = live[k];
+        asm.preload_regs(insn);
         emit_insn(asm, insn, insn.ip(), k as u32)?;
     }
+    asm.cached = 0;
     asm.flag_mask = FALL;
     Some(())
 }
@@ -212,7 +216,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs
     }
     let fpu = blocks.iter().flatten().flat_map(|b| &b.insns).any(|i| x87::is_x87(i.mnemonic()));
     crate::jit::PAGES.store(mem.pages_ptr(), std::sync::atomic::Ordering::Relaxed);
-    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), code_ptr: mem.code_pages_ptr(), bits, flag_mask: FALL, fpu, fdelta: 0 };
+    let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), code_ptr: mem.code_pages_ptr(), bits, flag_mask: FALL, fpu, fdelta: 0, cached: 0 };
     // 各ブロックの命令を別々に作る。作れないブロック（先頭以外）は外として扱う
     let mut bodies = Vec::new();
     let mut idx = Vec::new();
