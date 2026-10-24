@@ -91,11 +91,18 @@ pub fn selftest(x: u32) -> Result<u32, String> {
     Ok(f(x))
 }
 
+/// Jit::fast の大きさ（2 のべき）
+#[cfg(target_arch = "wasm32")]
+const FAST_SLOTS: usize = 4096;
+
 /// 変換したブロックを覚えて動かす（wasm の中だけ）。ネイティブでは実行できないので、いつも覚えないまま（インタープリター）
 pub struct Jit {
     /// ブロックの番地 → 変換した関数と入るブロックの番号（None は「変換できない」と分かったもの）。まとめた関数の途中のブロックも入れる
     #[cfg(target_arch = "wasm32")]
     funcs: std::collections::HashMap<u64, Option<(install::JitFn, u32)>, crate::emu::FastHash>,
+    /// funcs の前に引く直接の表（番地の下位で引く。番地, 関数, 入るブロックの番号）。変換済みのものだけを置く
+    #[cfg(target_arch = "wasm32")]
+    fast: Vec<(u64, Option<install::JitFn>, u32)>,
     /// 番地ごとの実行回数（この回数を超えたら変換する）
     hits: std::collections::HashMap<u64, u32, crate::emu::FastHash>,
     /// 変換を始める回数
@@ -116,6 +123,8 @@ impl Default for Jit {
         Jit {
             #[cfg(target_arch = "wasm32")]
             funcs: Default::default(),
+            #[cfg(target_arch = "wasm32")]
+            fast: vec![(u64::MAX, None, 0); FAST_SLOTS],
             hits: Default::default(),
             threshold,
             compiled: 0,
@@ -130,7 +139,10 @@ impl Default for Jit {
 impl Jit {
     pub fn clear(&mut self) {
         #[cfg(target_arch = "wasm32")]
-        self.funcs.clear();
+        {
+            self.funcs.clear();
+            self.fast.iter_mut().for_each(|s| *s = (u64::MAX, None, 0));
+        }
         self.hits.clear();
     }
 }
@@ -139,7 +151,14 @@ impl Jit {
 impl Jit {
     /// rip のブロックの変換済み関数。まだなら、回数を数え、十分なら変換する
     pub fn get(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize, regs: &[u64; 16]) -> Option<(install::JitFn, u32)> {
+        let slot = &mut self.fast[(rip ^ (rip >> 12)) as usize & (FAST_SLOTS - 1)];
+        if slot.0 == rip {
+            return slot.1.map(|f| (f, slot.2));
+        }
         if let Some(f) = self.funcs.get(&rip) {
+            if let Some((g, e)) = *f {
+                *slot = (rip, Some(g), e);
+            }
             return *f;
         }
         let h = self.hits.entry(rip).or_insert(0);
