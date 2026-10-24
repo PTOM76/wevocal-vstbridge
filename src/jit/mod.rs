@@ -149,12 +149,19 @@ impl Jit {
 
 #[cfg(target_arch = "wasm32")]
 impl Jit {
-    /// rip のブロックの変換済み関数。まだなら、回数を数え、十分なら変換する
+    /// rip のブロックの変換済み関数。まだなら、回数を数え、十分なら変換する（よく通る直接の表だけは、呼んだ所で引く）
+    #[inline(always)]
     pub fn get(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize, regs: &[u64; 16]) -> Option<(install::JitFn, u32)> {
-        let slot = &mut self.fast[(rip ^ (rip >> 12)) as usize & (FAST_SLOTS - 1)];
+        let slot = &self.fast[(rip ^ (rip >> 12)) as usize & (FAST_SLOTS - 1)];
         if slot.0 == rip {
             return slot.1.map(|f| (f, slot.2));
         }
+        self.get_slow(mem, bits, rip, max_block, regs)
+    }
+
+    #[inline(never)]
+    fn get_slow(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize, regs: &[u64; 16]) -> Option<(install::JitFn, u32)> {
+        let slot = &mut self.fast[(rip ^ (rip >> 12)) as usize & (FAST_SLOTS - 1)];
         if let Some(f) = self.funcs.get(&rip) {
             if let Some((g, e)) = *f {
                 *slot = (rip, Some(g), e);

@@ -122,7 +122,8 @@ impl Emu {
             if rip == RETURN_MAGIC {
                 return Ok(());
             }
-            if self.try_thunk(rip)? {
+            // ホストの関数の入口は THUNK_BASE より上だけ（ふつうのコードは呼び出しを省く）
+            if rip >= crate::emu::THUNK_BASE && self.try_thunk(rip)? {
                 if self.yield_req {
                     self.yield_req = false;
                     return Err(Fault(crate::emu::YIELD.into()));
