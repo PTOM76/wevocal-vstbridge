@@ -55,11 +55,13 @@ pub struct Gui {
     pub dibs: HashMap<u32, (u64, i32, i32, bool, u32)>,
     /// PostMessage で積まれたメッセージ（ウィンドウ, メッセージ, wParam, lParam）。idle のときに届ける
     pub posted: Vec<(u32, u32, u64, u64)>,
+    /// プラグインが渡したフォント（文字の形を答えるのに使う）
+    pub fonts: crate::fonts::Fonts,
 }
 
 impl Gui {
     pub fn new() -> Gui {
-        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, base: 0x1000_0000, dibs: HashMap::new(), posted: Vec::new() }
+        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, base: 0x1000_0000, dibs: HashMap::new(), posted: Vec::new(), fonts: Default::default() }
     }
 
     /// ウィンドウを作る（描く面は bg で塗る）。ハンドルを返す

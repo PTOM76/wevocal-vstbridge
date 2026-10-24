@@ -14,3 +14,4 @@ object = { version = "0.36", default-features = false, features = ["read_core", 
 wasm-bindgen = "0.2.129"
 font8x8 = { version = "0.3", default-features = false }
 wasm-encoder = "0.239"
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }

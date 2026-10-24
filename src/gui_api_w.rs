@@ -207,22 +207,6 @@ pub fn resolve(name: &str) -> Option<HostFn> {
             let (dst, src) = ((i(e, 2)?, i(e, 3)?, i(e, 4)?, i(e, 5)?), (i(e, 6)?, i(e, 7)?));
             put_dib(e, a(e, 1)?, dst, src, arg(e, 10)?, arg(e, 11)?)
         }),
-        "CreateFontIndirectW" => crate::gui_api::resolve("CreateFontIndirectA"),
-        // TEXTMETRIC（W は末尾の文字が 2 バイト）。選んだフォントの高さから、上 8 割、下 2 割とする
-        "GetTextMetricsW" | "GetTextMetricsA" => boxed(|e| {
-            let (dc, p) = (a(e, 1)?, arg(e, 2)?);
-            let h = e.gui.gdi.dc(dc).and_then(|d| match e.gui.gdi.objs.get(&d.font) {
-                Some(Obj::Font { height }) => Some(height.abs().max(1)),
-                _ => None,
-            }).unwrap_or(13);
-            let asc = (h * 4 + 2) / 5;
-            e.mem.write(p, &[0u8; 60])?;
-            // tmHeight、tmAscent、tmDescent、tmInternalLeading、tmExternalLeading、tmAveCharWidth、tmMaxCharWidth、tmWeight
-            for (k, v) in [h, asc, h - asc, 0, 0, h / 2, h, 400].iter().enumerate() {
-                e.mem.write_n(p + k as u64 * 4, 4, *v as u32 as u64)?;
-            }
-            Ok(1)
-        }),
         // ---- 画面（モニター）と DPI。1920 × 1080、96 DPI の画面が 1 つあるものとする ----
         "GetDpiForWindow" | "GetDpiForSystem" => boxed(|_| Ok(96)),
         // HORZRES=8、VERTRES=10、BITSPIXEL=12、PLANES=14、LOGPIXELSX=88、LOGPIXELSY=90

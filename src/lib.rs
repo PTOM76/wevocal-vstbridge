@@ -6,6 +6,7 @@ pub mod emu;
 pub mod exec;
 pub mod f80;
 pub mod fast;
+pub mod fonts;
 pub mod gdi;
 pub mod gui;
 pub mod gui_api;
