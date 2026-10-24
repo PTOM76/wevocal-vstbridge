@@ -4,7 +4,11 @@ use super::*;
 /// 変換できるか。mul、imul は 32 と 64 ビットの引数だけ
 pub(super) fn rw(i: &Instruction) -> Option<Rw> {
     let ok = match i.mnemonic() {
-        M::Cdq | M::Cqo => true,
+        M::Cdq | M::Cqo | M::Cdqe => true,
+        // 即値の数の rol、ror（32、64 ビット）。cf だけを書く（of は変えない。インタープリターと同じ）。数が 0 なら何もしない
+        M::Rol | M::Ror if int_operands_ok(i) && matches!(dst_size(i), 4 | 8) && i.op_count() == 2 && i.op_kind(1) == OpKind::Immediate8 => {
+            return Some(if rot_count(i) == 0 { Rw { kill: 0, emit: 0, read: 0 } } else { Rw { kill: FCF, emit: FCF, read: 0 } });
+        }
         M::Div | M::Idiv => i.op_count() == 1 && int_operands_ok(i) && matches!(dst_size(i), 4 | 8),
         // cf と of だけを書く
         M::Mul | M::Imul if i.op_count() == 1 && int_operands_ok(i) && matches!(dst_size(i), 4 | 8) => return Some(Rw { kill: FCF | FOF, emit: FCF | FOF, read: 0 }),
@@ -13,9 +17,47 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
     ok.then_some(Rw { kill: 0, emit: 0, read: 0 })
 }
 
+/// rol、ror の数（大きさで割った余り）
+fn rot_count(i: &Instruction) -> u32 {
+    let size = dst_size(i) as u32;
+    (i.immediate8() as u32 & if size == 8 { 63 } else { 31 }) % (size * 8)
+}
+
 pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Option<()> {
     match i.mnemonic() {
+        M::Rol | M::Ror => {
+            let (size, c) = (dst_size(i), rot_count(i));
+            if c == 0 {
+                return Some(());
+            }
+            let rol = i.mnemonic() == M::Rol;
+            asm.push_operand(&operand(i, 0)?, insn_addr, count);
+            if size == 8 {
+                asm.body.extend([W::I64Const(c as i64), if rol { W::I64Rotl } else { W::I64Rotr }]);
+            } else {
+                asm.body.extend([W::I32WrapI64, W::I32Const(c as i32), if rol { W::I32Rotl } else { W::I32Rotr }, W::I64ExtendI32U]);
+            }
+            asm.body.push(W::LocalSet(R));
+            // cf は、rol なら結果の最下位、ror なら最上位のビット
+            if asm.flag_mask & FCF != 0 {
+                let cf = asm.off.cf;
+                asm.cpu();
+                asm.body.push(W::LocalGet(R));
+                if !rol {
+                    asm.body.extend([W::I64Const(size as i64 * 8 - 1), W::I64ShrU]);
+                }
+                asm.body.extend([W::I32WrapI64, W::I32Const(1), W::I32And, W::I32Store8(MemArg { offset: cf, align: 0, memory_index: 0 })]);
+            }
+            asm.body.push(W::LocalGet(R));
+            emit_store_dst(asm, i, size, insn_addr, count)?;
+        }
         // edx（rdx）を eax（rax）の符号で埋める
+        // rax = eax を符号つきで広げたもの
+        M::Cdqe => {
+            asm.load_reg(0);
+            asm.body.push(W::I64Extend32S);
+            asm.store_reg(0, 8);
+        }
         M::Cdq | M::Cqo => {
             let (size, shift) = if i.mnemonic() == M::Cdq { (4, 31) } else { (8, 63) };
             asm.load_reg(0);

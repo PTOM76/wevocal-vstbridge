@@ -37,7 +37,7 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
         // シフトは即値の数だけ
         Psllq | Psrlq | Pslld | Psrld | Psrad => is_xmm(i, 0) && i.op_kind(1) == OpKind::Immediate8,
         Movmskps | Movmskpd => is_gpr(i, 0) && is_xmm(i, 1),
-        _ => false,
+        _ => return sse_pack::rw(i),
     };
     ok.then_some(Rw { kill: 0, emit: 0, read: 0 })
 }
@@ -246,7 +246,7 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             asm.body.extend([if m == M::Movmskps { W::I32x4Bitmask } else { W::I64x2Bitmask }, W::I64ExtendI32U]);
             asm.store_reg(idx, size);
         }
-        _ => return None,
+        _ => return sse_pack::emit(asm, i, insn_addr, count),
     }
     Some(())
 }
