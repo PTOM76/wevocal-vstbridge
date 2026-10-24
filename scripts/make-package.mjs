@@ -13,8 +13,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 /** AudioWorklet（TextDecoder も import.meta も無い）で動く形に、wasm-bindgen の web 版のグルーを加工する */
 export function workletGlue() {
   let src = readFileSync(join(root, 'pkg-web/vstbridge.js'), 'utf8')
-  // export を外す（クラス名と initSync はそのまま使う）
-  src = src.replace(/^export class /m, 'class ').replace(/^export \{[^}]*\};?\s*$/m, '')
+  // export を外す（クラス名と initSync はそのまま使う。クラスは JsVst、JsVstLoader など複数。関数も）
+  src = src.replace(/^export class /gm, 'class ').replace(/^export function /gm, 'function ').replace(/^export \{[^}]*\};?\s*$/m, '')
   // fetch を使う初期化（__wbg_init）は使わない。import.meta を含む行が構文エラーになるので消す
   src = src.replace(/async function __wbg_init[\s\S]*$/, '')
   // AudioWorkletGlobalScope には TextDecoder/TextEncoder が無いので、最小の UTF-8 の実装を先頭に足す
