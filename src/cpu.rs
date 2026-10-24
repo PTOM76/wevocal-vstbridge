@@ -13,6 +13,7 @@ pub struct Flags {
 }
 
 #[repr(C)]
+#[derive(Clone)]
 pub struct Cpu {
     /// rax、rcx、rdx、rbx、rsp、rbp、rsi、rdi、r8〜r15 の順（iced の Register と同じ並び）
     pub regs: [u64; 16],

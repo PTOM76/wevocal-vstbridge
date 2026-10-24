@@ -1,4 +1,4 @@
-//! host_stubs.rs に無い Windows の API のスタブ（主に、64 ビットの C のランタイムが初期化で呼ぶもの）。スレッドは無く、待つ関数はすぐ戻る
+//! host_stubs.rs に無い Windows の API のスタブ（主に、64 ビットの C のランタイムが初期化で呼ぶもの）。スレッドとイベントは threads.rs
 use crate::emu::{Emu, HostFn};
 use crate::host_stubs::arg;
 use crate::mem::R;
@@ -8,6 +8,14 @@ fn tick(e: &mut Emu) -> u64 {
     let t = e.heap_sizes.entry(TICK_KEY).or_insert(0);
     *t += 1000;
     *t as u64
+}
+/// 時計の今の値（ms。進めない）
+pub(crate) fn clock_ms(e: &mut Emu) -> u64 {
+    *e.heap_sizes.entry(TICK_KEY).or_insert(0) as u64 / 1000
+}
+/// 時計を ms だけ進める（スレッドの待ちの期限のため。idle ごとに進める）
+pub(crate) fn advance_clock(e: &mut Emu, ms: u64) {
+    *e.heap_sizes.entry(TICK_KEY).or_insert(0) += ms as usize * 1000;
 }
 /// heap_sizes に、確保した番地と重ならない鍵で値を置く（時計、FLS と TLS の値）
 const TICK_KEY: u64 = 1;
@@ -43,14 +51,14 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
     match name {
         // ポインターの符号化はしない（そのまま返す）。0 を返すと、ランタイムが壊れた関数ポインターとして終了する
         "EncodePointer" | "DecodePointer" | "EncodeSystemPointer" | "DecodeSystemPointer" => Some(Box::new(|e: &mut Emu| -> R<u64> { arg(e, 1) })),
-        "InitializeCriticalSectionAndSpinCount" | "InitializeCriticalSectionEx" | "TryEnterCriticalSection" | "HeapSetInformation" | "FlsFree" | "TlsFree" | "CloseHandle" | "SetEvent" | "ResetEvent" | "ReleaseMutex" | "IsValidCodePage" | "IsValidLocale" | "SetThreadPriority" | "FlushFileBuffers" => ok(1),
+        "InitializeCriticalSectionAndSpinCount" | "InitializeCriticalSectionEx" | "TryEnterCriticalSection" | "HeapSetInformation" | "FlsFree" | "TlsFree" | "CloseHandle" | "ReleaseMutex" | "IsValidCodePage" | "IsValidLocale" | "SetThreadPriority" | "FlushFileBuffers" => ok(1),
         "InitializeSListHead" | "InitializeSRWLock" | "AcquireSRWLockExclusive" | "ReleaseSRWLockExclusive" | "AcquireSRWLockShared" | "ReleaseSRWLockShared" | "InitializeConditionVariable" | "WakeConditionVariable" | "WakeAllConditionVariable" | "IsDebuggerPresent" | "SetUnhandledExceptionFilter" | "UnhandledExceptionFilter" | "OutputDebugStringW" | "GetThreadPriority" | "InterlockedFlushSList" => ok(0),
         "GetCurrentProcessId" => ok(0x1000),
         "GetCurrentThread" => ok(u64::MAX - 1),
         "GetUserDefaultLCID" => ok(0x409),
-        // 待つものはすぐ戻る（WAIT_OBJECT_0）。イベントなどは偽のハンドル
-        "WaitForSingleObject" | "WaitForSingleObjectEx" | "WaitForMultipleObjects" => ok(0),
-        "CreateEventW" | "CreateEventA" | "CreateMutexW" | "CreateMutexA" | "CreateSemaphoreW" => ok(0x200),
+        // 複数の待ちはすぐ戻る（WAIT_OBJECT_0）。ミューテックスなどは偽のハンドル（イベントと 1 つの待ちは threads.rs）
+        "WaitForMultipleObjects" => ok(0),
+        "CreateMutexW" | "CreateMutexA" | "CreateSemaphoreW" => ok(0x200),
         "GetSystemTimeAsFileTime" => Some(Box::new(|e: &mut Emu| -> R<u64> {
             let t = 0x01DC_0000_0000_0000 + tick(e);
             e.mem.write_n(arg(e, 1)?, 8, t)?;
@@ -99,14 +107,6 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
             e.mem.write(p, &[0u8; 104])?;
             e.mem.write_n(p, 4, 104)?;
             Ok(0)
-        })),
-        // スレッドは動かせないので、作ったことにして偽のハンドルを返す（スレッドの関数は呼ばない。6 つ目の引数にスレッドの ID を書く）
-        "CreateThread" => Some(Box::new(|e: &mut Emu| -> R<u64> {
-            let id = arg(e, 6)?;
-            if id != 0 {
-                e.mem.write_n(id, 4, 2)?;
-            }
-            Ok(0x7000_1000)
         })),
         // SYSTEM_INFO（ページは 4KB、確保の単位は 64KB、CPU は 1 つ）
         "GetSystemInfo" | "GetNativeSystemInfo" => Some(Box::new(|e: &mut Emu| -> R<u64> {

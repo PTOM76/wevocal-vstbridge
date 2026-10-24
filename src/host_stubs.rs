@@ -37,6 +37,13 @@ pub fn arg_count(name: &str) -> u64 {
         // KERNEL32 の足りないもの
         "GlobalFree" | "GlobalLock" | "GlobalUnlock" | "GlobalSize" | "FreeLibrary" | "TlsFree" | "SetUnhandledExceptionFilter" => 1,
         "VirtualFree" => 3,
+        // スレッドとイベント（threads.rs）
+        "SwitchToThread" => 0,
+        "ResumeThread" | "SetEvent" | "ResetEvent" => 1,
+        "GetExitCodeThread" | "WaitForSingleObject" | "SleepEx" => 2,
+        "WaitForSingleObjectEx" | "SleepConditionVariableSRW" => 3,
+        "CreateEventW" | "CreateEventA" | "CreateEventExW" | "CreateEventExA" | "SleepConditionVariableCS" => 4,
+        "CreateThread" => 6,
         _ => crate::win32_args::gui_arg_count(name).unwrap_or(0),
     }
 }
@@ -47,6 +54,11 @@ pub fn resolve(dll: &str, name: &str) -> Option<HostFn> {
     // API セット（api-ms-win-core-…）と KERNELBASE の関数は KERNEL32 と同じものとして扱う（新しい C のランタイムは GetProcAddress でこちらから引く）
     if dll.starts_with("API-MS-WIN-") || dll.starts_with("KERNELBASE") {
         dll = "KERNEL32.DLL".into();
+    }
+    if dll == "KERNEL32.DLL" {
+        if let Some(f) = crate::threads::resolve(name) {
+            return Some(f);
+        }
     }
     match (dll.as_str(), name) {
         // LoadLibrary(name)。本物の読み込みはせず、名前を覚えて偽のハンドルを返す（GetProcAddress で名前に戻す）

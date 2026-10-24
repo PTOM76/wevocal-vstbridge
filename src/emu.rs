@@ -68,6 +68,8 @@ pub struct Emu {
     pub(crate) call_start: u64,
     /// ホストの関数が「ここで中断してほしい」と要求した（run が YIELD で止まる。再開は resume）
     pub yield_req: bool,
+    /// プラグインが作ったスレッド（threads.rs。交代で少しずつ動かす）
+    pub threads: crate::threads::Threads,
     /// 全命令とレジスタを出す（環境変数 VSTBRIDGE_TRACE。毎命令は読まないよう、作るときに 1 度だけ読む）
     trace: bool,
     /// デコード済みの命令（番地 → 命令）。コードが書き換わる（自己展開が終わったあと）ことはないとみなす。展開が終わってから使うため、書き込みで無効にする
@@ -114,16 +116,18 @@ impl Emu {
             let _ = mem.write_n(teb + 0x18, 4, teb); // 自分自身を指す（fs:[0x18]）
             cpu.fs_base = teb;
         } else {
-            // 64 ビットの TEB の最小限（gs: で読む）。gs:[8]=スタックの上限、gs:[0x10]=下限（__chkstk が見る）、gs:[0x30]=自分自身、gs:[0x60]=PEB（中身は 0）
+            // 64 ビットの TEB の最小限（gs: で読む）。gs:[8]=スタックの上限、gs:[0x10]=下限（__chkstk が見る）、gs:[0x30]=自分自身、gs:[0x60]=PEB（ProcessParameters のほかは 0）
             let teb = 0x7FFD_0000u64;
             mem.map(teb, 0x2000);
             let _ = mem.write_n(teb + 8, 8, top);
             let _ = mem.write_n(teb + 0x10, 8, top - STACK_SIZE as u64);
             let _ = mem.write_n(teb + 0x30, 8, teb);
             let _ = mem.write_n(teb + 0x60, 8, teb + 0x1000);
+            // PEB+0x20 = ProcessParameters（中身は 0。C のランタイムが見る）
+            let _ = mem.write_n(teb + 0x1020, 8, teb + 0x1800);
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, threads: Default::default(), trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
