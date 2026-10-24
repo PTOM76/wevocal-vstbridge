@@ -27,25 +27,26 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
         }
         // edx:eax を割り、商を eax、余りを edx に。0 で割るときと、符号つきの -1 で割るとき（wasm が止まる形）はインタープリターに任せる
         M::Div | M::Idiv if dst_size(i) == 8 => {
-            // 割られる数が rax に収まる（rdx が rax の符号か 0）ときだけ。ほかと、0 と -1 で割るときはインタープリター
+            // 0 で割るときはインタープリター。割られる数が rax に収まらない（rdx が rax の符号か 0 でない）ときと、符号つきの -1 で割るとき（wasm が止まる形）は Rust の 128 ビットの割り算
             let signed = i.mnemonic() == M::Idiv;
             asm.push_operand(&operand(i, 0)?, insn_addr, count);
             asm.body.push(W::LocalTee(B));
             asm.body.push(W::I64Eqz);
-            if signed {
-                asm.body.extend([W::LocalGet(B), W::I64Const(-1), W::I64Eq, W::I32Or]);
-            }
-            asm.load_reg(2);
-            if signed {
-                asm.load_reg(0);
-                asm.body.extend([W::I64Const(63), W::I64ShrS, W::I64Ne]);
-            } else {
-                asm.body.extend([W::I64Const(0), W::I64Ne]);
-            }
-            asm.body.push(W::I32Or);
             asm.body.push(W::If(BlockType::Empty));
             asm.emit_bail(insn_addr, count);
             asm.body.push(W::End);
+            asm.load_reg(2);
+            if signed {
+                asm.load_reg(0);
+                asm.body.extend([W::I64Const(63), W::I64ShrS, W::I64Ne, W::LocalGet(B), W::I64Const(-1), W::I64Eq, W::I32Or]);
+            } else {
+                asm.body.extend([W::I64Const(0), W::I64Ne]);
+            }
+            asm.body.push(W::If(BlockType::Empty));
+            asm.cpu();
+            asm.body.extend([W::LocalGet(B), W::I64Store(MemArg { offset: offset_of!(Cpu, jit_tmp) as u64, align: 3, memory_index: 0 })]);
+            asm.call_helper(crate::jit::div128 as *const () as usize, W::I32Const(signed as i32));
+            asm.body.push(W::Else);
             let (div, rem) = if signed { (W::I64DivS, W::I64RemS) } else { (W::I64DivU, W::I64RemU) };
             // 割られる数を A に取ってから、余り（rdx）、商（rax）の順に書く
             asm.load_reg(0);
@@ -53,6 +54,7 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             asm.store_reg(2, 8);
             asm.body.extend([W::LocalGet(A), W::LocalGet(B), div]);
             asm.store_reg(0, 8);
+            asm.body.push(W::End);
         }
         // edx:eax = eax × 引数。上位が下位の符号拡張（imul）か 0（mul）でなければ cf、of を立てる
         // rdx:rax = rax × 引数。上位は 32 ビットずつに分けて求める（符号つきは、負の側の分を引いて直す）

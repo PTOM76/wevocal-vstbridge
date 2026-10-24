@@ -225,16 +225,7 @@ pub fn exec(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<bool> {
                 if v == 0 {
                     return Err(Fault("divide by zero".into()));
                 }
-                let dividend: i128 = if signed {
-                    let top = (hi as i128) << bits;
-                    let full = top | acc_lo as i128;
-                    // 上位を含めた全体を符号つきの数にする
-                    (full << (128 - 2 * bits)) >> (128 - 2 * bits)
-                } else {
-                    ((hi as u128) << bits | acc_lo as u128) as i128
-                };
-                let d = wide(v);
-                let (q, r) = (dividend / d, dividend % d);
+                let (q, r) = div_wide(signed, size, hi, acc_lo, v);
                 if size == 1 {
                     cpu.regs[0] = (cpu.regs[0] & !0xffff) | (((r as u64) & 0xff) << 8) | ((q as u64) & 0xff);
                 } else {
@@ -487,5 +478,20 @@ fn string_cmps(cpu: &mut Cpu, mem: &mut Memory, i: &Instruction) -> R<()> {
         if cpu.regs[1] == 0 || (i.has_repe_prefix() && !cpu.flags.zf) || (i.has_repne_prefix() && cpu.flags.zf) {
             return Ok(());
         }
+    }
+}
+
+/// 1 引数の div、idiv の商と余り（割られる数は hi:lo、割る数は v。どれも size バイト）。商があふれたときは切り詰める。JIT の遅い道も使う
+pub fn div_wide(signed: bool, size: usize, hi: u64, lo: u64, v: u64) -> (u64, u64) {
+    let bits = size * 8;
+    if signed {
+        let full = ((hi as i128) << bits) | lo as i128;
+        // 上位を含めた全体を符号つきの数にする
+        let dividend = (full << (128 - 2 * bits)) >> (128 - 2 * bits);
+        let d = sext(v, size) as i64 as i128;
+        (dividend.wrapping_div(d) as u64, dividend.wrapping_rem(d) as u64)
+    } else {
+        let dividend = (hi as u128) << bits | lo as u128;
+        ((dividend / v as u128) as u64, (dividend % v as u128) as u64)
     }
 }

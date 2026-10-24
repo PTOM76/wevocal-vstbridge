@@ -211,6 +211,7 @@ pub fn compile_block(mem: &Memory, bits: u32, start: u64, max_block: usize, regs
         k += 1;
     }
     let fpu = blocks.iter().flatten().flat_map(|b| &b.insns).any(|i| x87::is_x87(i.mnemonic()));
+    crate::jit::PAGES.store(mem.pages_ptr(), std::sync::atomic::Ordering::Relaxed);
     let mut asm = Asm { body: Vec::new(), off: offs(), pages_ptr: mem.pages_ptr(), code_ptr: mem.code_pages_ptr(), bits, flag_mask: FALL, fpu, fdelta: 0 };
     // 各ブロックの命令を別々に作る。作れないブロック（先頭以外）は外として扱う
     let mut bodies = Vec::new();

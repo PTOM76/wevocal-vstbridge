@@ -211,6 +211,26 @@ impl Asm {
         self.body.push(W::I32Add);
         self.body.push(W::LocalSet(HP));
     }
+    /// GA から size バイトの、先頭と終わりのページが引けるか（write なら、命令のあるページでないか）を確かめ、だめなら中断する。ページをまたぐ読み書きを遅い道でするときに使う
+    fn check_pages(&mut self, size: usize, write: bool, insn_addr: u64, count: u32) {
+        for add in [0, size as i32 - 1] {
+            self.body.extend([W::LocalGet(GA), W::I32Const(add), W::I32Add, W::I32Const(12), W::I32ShrU, W::LocalSet(HP)]);
+            self.body.extend([W::LocalGet(HP), W::I32Const(2), W::I32Shl, W::I32Const(self.pages_ptr as i32), W::I32Add]);
+            self.body.extend([W::I32Load(MemArg { offset: 0, align: 2, memory_index: 0 }), W::I32Eqz]);
+            if write {
+                self.body.extend([W::LocalGet(HP), W::I32Const(3), W::I32Shl, W::I32Const(self.code_ptr as i32), W::I32Add]);
+                self.body.extend([W::I64Load(MemArg { offset: 0, align: 3, memory_index: 0 }), W::I64Const(0), W::I64Ne, W::I32Or]);
+            }
+            self.body.push(W::If(BlockType::Empty));
+            self.emit_bail(insn_addr, count);
+            self.body.push(W::End);
+        }
+    }
+    /// 遅い道の Rust の関数 f(cpu, arg) を表の添字で呼ぶ
+    fn call_helper(&mut self, f: usize, arg: W<'static>) {
+        self.cpu();
+        self.body.extend([arg, W::I32Const(f as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
+    }
     /// x87 のスタックの先頭と深さを、今のずれで書き戻す（ブロックから抜ける所で）
     fn fpu_sync(&mut self) {
         if !self.fpu || self.fdelta == 0 {

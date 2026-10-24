@@ -41,19 +41,42 @@ pub extern "C" fn x87_helper(cpu: u32, k: u32) {
     crate::x87::transcend(cpu, crate::x87::TRANSCEND[k as usize]);
 }
 
-/// JIT の遅い道: fld tbyte。hp は 10 バイトのホストの番地
-pub extern "C" fn f80_load(cpu: u32, hp: u32) {
-    // SAFETY: x87_helper と同じ。hp は生成したコードがページ表で引いた、10 バイトが読める番地
-    let (cpu, b) = unsafe { (&mut *(cpu as usize as *mut crate::cpu::Cpu), *(hp as usize as *const [u8; 10])) };
+/// ページ表の先頭（ホストの番地）。変換するときに入れ、遅い道がゲストの番地を引くのに使う
+pub static PAGES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// ゲストの番地 ga の 1 バイトのホストの番地。生成したコードが、先頭と終わりのページが引けることを確かめてから呼ぶ
+fn guest_byte(ga: u32) -> *mut u8 {
+    let pages = PAGES.load(std::sync::atomic::Ordering::Relaxed) as usize as *const usize;
+    // SAFETY: pages は Memory::pages（2^20 個）。ga >> 12 はその範囲に収まる
+    let p = unsafe { *pages.add((ga >> 12) as usize) };
+    (p + (ga & 0xfff) as usize) as *mut u8
+}
+
+/// JIT の遅い道: fld tbyte。ga は 10 バイトのゲストの番地（ページをまたいでもよい）
+pub extern "C" fn f80_load(cpu: u32, ga: u32) {
+    // SAFETY: 生成したコードは、動いている Emu の Cpu の番地と、引けると確かめた番地を渡す
+    let cpu = unsafe { &mut *(cpu as usize as *mut crate::cpu::Cpu) };
+    let b: [u8; 10] = std::array::from_fn(|k| unsafe { *guest_byte(ga.wrapping_add(k as u32)) });
     cpu.fpush(crate::f80::to_f64(b));
 }
 
 /// JIT の遅い道: fstp tbyte
-pub extern "C" fn f80_store_pop(cpu: u32, hp: u32) {
+pub extern "C" fn f80_store_pop(cpu: u32, ga: u32) {
     // SAFETY: f80_load と同じ
     let cpu = unsafe { &mut *(cpu as usize as *mut crate::cpu::Cpu) };
-    unsafe { *(hp as usize as *mut [u8; 10]) = crate::f80::from_f64(cpu.st(0)) };
+    for (k, v) in crate::f80::from_f64(cpu.st(0)).into_iter().enumerate() {
+        unsafe { *guest_byte(ga.wrapping_add(k as u32)) = v };
+    }
     cpu.fpop();
+}
+
+/// JIT の遅い道: 64 ビットの div、idiv で、割られる数が rax に収まらないとき。と、符号つきの -1 で割るとき。割る数は cpu.jit_tmp（0 は来ない）
+pub extern "C" fn div128(cpu: u32, signed: u32) {
+    // SAFETY: x87_helper と同じ
+    let cpu = unsafe { &mut *(cpu as usize as *mut crate::cpu::Cpu) };
+    let (q, r) = crate::exec::div_wide(signed != 0, 8, cpu.regs[2], cpu.regs[0], cpu.jit_tmp);
+    cpu.regs[0] = q;
+    cpu.regs[2] = r;
 }
 
 /// つなぎ方の確かめ: 引数に 42 を足して返す関数を作って呼ぶ

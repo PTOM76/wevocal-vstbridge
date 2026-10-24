@@ -37,11 +37,13 @@ pub struct Cpu {
     pub fpu_cw: u16,
     /// JIT が、対応しない命令やメモリの遅い道に当たって中断したか（1 なら、その命令からインタープリターで続ける）
     pub jit_bail: u32,
+    /// JIT の遅い道へ値を渡す置き場（64 ビットの div の割る数）
+    pub jit_tmp: u64,
 }
 
 impl Default for Cpu {
     fn default() -> Self {
-        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0, fpu: [0.0; 8], fpu_top: 0, fpu_c: (false, false, false, false), fpu_depth: 0, fpu_cw: 0x037f, jit_bail: 0 }
+        Cpu { regs: [0; 16], rip: 0, flags: Flags::default(), xmm: [0; 16], steps: 0, width: 8, fs_base: 0, fpu: [0.0; 8], fpu_top: 0, fpu_c: (false, false, false, false), fpu_depth: 0, fpu_cw: 0x037f, jit_bail: 0, jit_tmp: 0 }
     }
 }
 

@@ -59,8 +59,7 @@ impl Asm {
         self.fpu_sync();
         self.body.extend([W::LocalGet(FT), W::I32Const(fdelta), W::I32Add, W::I32Const(7), W::I32And, W::LocalSet(FT)]);
         self.fdelta = 0;
-        self.cpu();
-        self.body.extend([arg, W::I32Const(f as i32), W::CallIndirect { type_index: 1, table_index: 0 }]);
+        self.call_helper(f, arg);
         self.cpu();
         self.body.extend([W::I32Load(MemArg { offset: offset_of!(Cpu, fpu_top) as u64, align: 2, memory_index: 0 }), W::LocalSet(FT)]);
     }
@@ -161,16 +160,16 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
     let mem = mem_op(i);
     let reg = |n: u32| streg(i.op_register(n));
     match m {
-        // 80 ビットのメモリは、Rust（インタープリターと同じ変換）を呼ぶ
+        // 80 ビットのメモリは、Rust（インタープリターと同じ変換）を呼ぶ。ページをまたいでもよい（スタックの上の値がまたぐことがある）
         M::Fld | M::Fstp if mem && i.memory_size().size() == 10 => {
             let Opnd::Mem(mo, _) = operand(i, 0)? else { return None };
             asm.calc_addr(&mo);
             if m == M::Fld {
-                asm.resolve_ptr(10, insn_addr, count);
-                asm.call_rust(crate::jit::f80_load as *const () as usize, W::LocalGet(HP));
+                asm.check_pages(10, false, insn_addr, count);
+                asm.call_rust(crate::jit::f80_load as *const () as usize, W::LocalGet(GA));
             } else {
-                asm.resolve_ptr_w(10, insn_addr, count);
-                asm.call_rust(crate::jit::f80_store_pop as *const () as usize, W::LocalGet(HP));
+                asm.check_pages(10, true, insn_addr, count);
+                asm.call_rust(crate::jit::f80_store_pop as *const () as usize, W::LocalGet(GA));
             }
         }
         M::Fld | M::Fild => {
