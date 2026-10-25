@@ -1,7 +1,13 @@
 # WeVocalVstBridge
-WeVocalVstBridge は、Windows 向けの VST プラグイン（DLL）を、x86-64 のエミュレーターで動かすためのライブラリである。最終的には wasm にして、PWA（ブラウザ）の中で VST を直接動かすことを目指す。
+WeVocalVstBridge は、Windows向けのVSTプラグイン（DLL）を、ウェブ上(WASM)で動作させるためのエミュレータ、ライブラリである。<br />
+WeVocal Studio と WeVocalSynth でVSTプラグインを読み込むための実行環境として開発している。
 
-WeVocal Studio と WeVocalSynth で VST を読み込むための実行環境として作っている。開発中で、まだ実用にはならない。
+以下、SH-1 Graphic EQ の動作画面
+
+<img width="320" alt="WeVocal StudioでのSH-1 Graphic EQの動作画面" src="docs/images/sh-1_graphic_eq_gui.png">
+
+<img width="320" alt="WeVocal StudioでのSH-1 Graphic EQのパラメータ画面" src="docs/images/sh-1_graphic_eq_param.png">
+
 
 ## 特徴
 | 項目 | 内容 |
