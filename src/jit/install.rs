@@ -29,6 +29,11 @@ thread_local! {
     static SLOTS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
 }
 
+/// 表の空いている場所を忘れる（メモリの写しから戻したとき。戻した先の表は広げていないので、次は広げ直す）
+pub fn reset_slots() {
+    SLOTS.set((0, 0));
+}
+
 /// 表の空いている場所を 1 つ返す。足りなければ 256 個まとめて広げる（1 個ずつ広げると、そのたびに写し直しになる）
 fn next_slot(table: &WebAssembly::Table) -> Result<u32, JsValue> {
     let (mut next, mut end) = SLOTS.get();

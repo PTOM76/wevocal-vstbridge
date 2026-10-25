@@ -55,6 +55,18 @@ impl JsVst {
         Loader::load(dll).map(JsVst::from).map_err(|e| JsError::new(&e.0))
     }
 
+    /// wasm のメモリの写しから戻したあとに呼ぶ。変換した関数（JIT）は元の wasm の関数の表にあり、戻した先には無いので捨てる（使うとまた変換する）。
+    /// 写しは、読み込みの済んだ JsVst があるメモリを、JS から何も呼んでいない間にまるごと写したもの（同じ wasm に限る）
+    #[wasm_bindgen(js_name = afterRestore)]
+    pub fn after_restore(&mut self) {
+        match &mut self.0 {
+            Plugin::X86(v) => v.emu.jit.clear(),
+            Plugin::X64(v) => v.emu.jit.clear(),
+        }
+        #[cfg(target_arch = "wasm32")]
+        crate::jit::install::reset_slots();
+    }
+
     /// 32 ビットの DLL か
     #[wasm_bindgen(getter, js_name = is32bit)]
     pub fn is_32bit(&self) -> bool {

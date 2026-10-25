@@ -61,7 +61,15 @@ if (typeof TextEncoder === 'undefined') {
   }
 }
 `
-  return polyfill + src
+  // 全体を関数で包む。呼ぶたびに別の wasm の instance になる（メモリの写しから戻す VST は、ほかの VST とメモリを分けるため）。
+  // 上の階層には今までどおり 1 つ目の instance の initSync、JsVst、JsVstLoader を置く
+  return `${polyfill}
+function __vstBridge() {
+${src}
+return { initSync, JsVst, JsVstLoader }
+}
+const { initSync, JsVst, JsVstLoader } = __vstBridge()
+`
 }
 
 /** id に使える形にする */
