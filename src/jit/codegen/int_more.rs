@@ -1,10 +1,16 @@
-//! 整数の命令の残り（cdq、cqo、div、idiv、引数が 1 つの mul、imul）を wasm に変換する（インタープリターの exec.rs と同じ動き）
+//! 整数の命令の残り（cdq、cqo、div、idiv、引数が 1 つの mul、imul、xadd、xchg、stmxcsr と何もしない命令）を wasm に変換する（インタープリターの exec.rs と同じ動き）
 use super::*;
 
 /// 変換できるか。mul、imul は 32 と 64 ビットの引数だけ
 pub(super) fn rw(i: &Instruction) -> Option<Rw> {
     let ok = match i.mnemonic() {
         M::Cdq | M::Cqo | M::Cdqe => true,
+        // スレッドは 1 つなので lock とフェンスは何もしない。MXCSR は既定の値だけを持つ（インタープリターと同じ）
+        M::Sfence | M::Lfence | M::Mfence | M::Pause | M::Cld | M::Ldmxcsr => true,
+        M::Stmxcsr => i.op_kind(0) == OpKind::Memory && operand(i, 0).is_some(),
+        // 引数 1 はレジスタだけ（xchg のレジスタ, メモリの形はインタープリター）。xadd は add と同じフラグを書く
+        M::Xadd if int_operands_ok(i) && i.op_kind(1) == OpKind::Register => return Some(Rw { kill: FALL, emit: FALL, read: 0 }),
+        M::Xchg => int_operands_ok(i) && i.op_kind(1) == OpKind::Register,
         // 即値の数の rol、ror（32、64 ビット）。cf だけを書く（of は変えない。インタープリターと同じ）。数が 0 なら何もしない
         M::Rol | M::Ror if int_operands_ok(i) && matches!(dst_size(i), 4 | 8) && i.op_count() == 2 && i.op_kind(1) == OpKind::Immediate8 => {
             return Some(if rot_count(i) == 0 { Rw { kill: 0, emit: 0, read: 0 } } else { Rw { kill: FCF, emit: FCF, read: 0 } });
@@ -25,6 +31,42 @@ fn rot_count(i: &Instruction) -> u32 {
 
 pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Option<()> {
     match i.mnemonic() {
+        M::Sfence | M::Lfence | M::Mfence | M::Pause | M::Cld | M::Ldmxcsr => {}
+        M::Stmxcsr => {
+            asm.body.push(W::I64Const(0x1f80));
+            emit_store_dst(asm, i, 4, insn_addr, count)?;
+        }
+        // A = 引数 0、B = 引数 1。xadd は引数 0 に和、引数 1 に前の引数 0。xchg は入れ替え。
+        // メモリへの書き込みは中断しうるので先に書き、レジスタはそのあと。どちらもレジスタなら、インタープリターと同じく引数 1、引数 0 の順に書く
+        M::Xadd | M::Xchg => {
+            let size = dst_size(i);
+            let Opnd::Reg(src, ssize) = operand(i, 1)? else { return None };
+            asm.push_operand(&operand(i, 0)?, insn_addr, count);
+            asm.body.push(W::LocalSet(A));
+            asm.push_operand(&operand(i, 1)?, insn_addr, count);
+            mask_i64(&mut asm.body, size);
+            asm.body.push(W::LocalSet(B));
+            if i.mnemonic() == M::Xadd {
+                asm.body.extend([W::LocalGet(A), W::LocalGet(B), W::I64Add]);
+                mask_i64(&mut asm.body, size);
+                asm.body.push(W::LocalSet(R));
+                asm.flags_addsub(false, size);
+                // 引数 0 に書く値を B に置く（store_reg が R を使うため）
+                asm.body.extend([W::LocalGet(R), W::LocalSet(B)]);
+            }
+            if i.op_kind(0) == OpKind::Memory {
+                asm.body.push(W::LocalGet(B));
+                emit_store_dst(asm, i, size, insn_addr, count)?;
+                asm.body.push(W::LocalGet(A));
+                asm.store_reg(src, ssize);
+            } else {
+                let Opnd::Reg(dst, dsize) = operand(i, 0)? else { return None };
+                asm.body.push(W::LocalGet(A));
+                asm.store_reg(src, ssize);
+                asm.body.push(W::LocalGet(B));
+                asm.store_reg(dst, dsize);
+            }
+        }
         M::Rol | M::Ror => {
             let (size, c) = (dst_size(i), rot_count(i));
             if c == 0 {

@@ -798,7 +798,7 @@ fn emit_insn(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -> Opti
         // 条件が偽なら書かない（上位 32 ビットも消さない。インタープリターと同じ）。読みは条件によらず行う
         _ if x87::is_x87(m) => x87::emit(asm, i, insn_addr, count),
         M::Push | M::Pop | M::Leave => stack::emit(asm, i, insn_addr, count),
-        M::Cdq | M::Cqo | M::Cdqe | M::Div | M::Idiv | M::Rol | M::Ror => int_more::emit(asm, i, insn_addr, count),
+        M::Cdq | M::Cqo | M::Cdqe | M::Div | M::Idiv | M::Rol | M::Ror | M::Xadd | M::Xchg | M::Stmxcsr | M::Ldmxcsr | M::Sfence | M::Lfence | M::Mfence | M::Pause | M::Cld => int_more::emit(asm, i, insn_addr, count),
         M::Mul | M::Imul if i.op_count() == 1 => int_more::emit(asm, i, insn_addr, count),
         _ if is_cmov(m) => {
             let size = dst_size(i);
@@ -1081,7 +1081,7 @@ fn insn_rw(i: &Instruction) -> Option<Rw> {
                 None => return None,
             }
         }
-        Cdq | Cqo | Cdqe | Div | Idiv | Rol | Ror => return int_more::rw(i),
+        Cdq | Cqo | Cdqe | Div | Idiv | Rol | Ror | Xadd | Xchg | Stmxcsr | Ldmxcsr | Sfence | Lfence | Mfence | Pause | Cld => return int_more::rw(i),
         Mul | Imul if i.op_count() == 1 => return int_more::rw(i),
         Imul if i.op_count() >= 2 => {
             if !int_operands_ok(i) {
