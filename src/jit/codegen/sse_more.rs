@@ -37,6 +37,8 @@ pub(super) fn rw(i: &Instruction) -> Option<Rw> {
         // シフトは即値の数だけ
         Psllq | Psrlq | Pslld | Psrld | Psrad => is_xmm(i, 0) && i.op_kind(1) == OpKind::Immediate8,
         Movmskps | Movmskpd => is_gpr(i, 0) && is_xmm(i, 1),
+        Pextrw => is_gpr(i, 0) && is_xmm(i, 1),
+        Cvtpd2dq | Cvttpd2dq => is_xmm(i, 0) && (is_xmm(i, 1) || is_mem(i, 1, &[16])),
         _ => return sse_pack::rw(i),
     };
     ok.then_some(Rw { kill: 0, emit: 0, read: 0 })
@@ -245,6 +247,32 @@ pub(super) fn emit(asm: &mut Asm, i: &Instruction, insn_addr: u64, count: u32) -
             asm.body.push(W::V128Load(xmm_arg(xmm(i.op_register(1))?, 4)));
             asm.body.extend([if m == M::Movmskps { W::I32x4Bitmask } else { W::I64x2Bitmask }, W::I64ExtendI32U]);
             asm.store_reg(idx, size);
+        }
+        // 16 ビットの組を 1 つ取り出す（上位は 0）
+        M::Pextrw => {
+            let (idx, size) = gpr(i.op_register(0))?;
+            asm.cpu();
+            asm.body.push(W::V128Load(xmm_arg(xmm(i.op_register(1))?, 4)));
+            asm.body.extend([W::I16x8ExtractLaneU(i.immediate8() & 7), W::I64ExtendI32U]);
+            asm.store_reg(idx, size);
+        }
+        // f64 2 つ → i32 の下位 2 つ（上位は 0）。cvtpd2dq は最も近い偶数、cvttpd2dq は 0 の方向に丸める。範囲の外と NaN は 0x80000000
+        M::Cvtpd2dq | M::Cvttpd2dq => {
+            let d = xmm(i.op_register(0))?;
+            asm.cpu();
+            let al = xmm_ptr(asm, i, 1, 16, insn_addr, count)?;
+            asm.body.extend([v128ld(al), W::LocalSet(V0), W::V128Const(0)]);
+            for k in 0..2 {
+                asm.body.extend([W::LocalGet(V0), W::F64x2ExtractLane(k)]);
+                if m == M::Cvtpd2dq {
+                    asm.body.push(W::F64Nearest);
+                }
+                asm.body.push(W::LocalSet(D0));
+                asm.body.extend([W::LocalGet(D0), W::I32TruncSatF64S, W::I32Const(0x8000_0000u32 as i32)]);
+                asm.body.extend([W::LocalGet(D0), W::F64Const((-2147483648.0f64).into()), W::F64Ge, W::LocalGet(D0), W::F64Const(2147483648.0f64.into()), W::F64Lt, W::I32And, W::Select]);
+                asm.body.push(W::I32x4ReplaceLane(k));
+            }
+            asm.body.push(W::V128Store(xmm_arg(d, 4)));
         }
         _ => return sse_pack::emit(asm, i, insn_addr, count),
     }
