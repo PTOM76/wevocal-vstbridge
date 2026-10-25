@@ -159,6 +159,13 @@ impl Jit {
         self.get_slow(mem, bits, rip, max_block, regs)
     }
 
+    /// 直接の表に変換済みの関数があれば返す（数えない、変換しない。続けて JIT の関数を呼ぶときに使う）
+    #[inline(always)]
+    pub fn peek(&self, rip: u64) -> Option<(install::JitFn, u32)> {
+        let slot = &self.fast[(rip ^ (rip >> 12)) as usize & (FAST_SLOTS - 1)];
+        if slot.0 == rip { slot.1.map(|f| (f, slot.2)) } else { None }
+    }
+
     #[inline(never)]
     fn get_slow(&mut self, mem: &crate::mem::Memory, bits: u32, rip: u64, max_block: usize, regs: &[u64; 16]) -> Option<(install::JitFn, u32)> {
         let slot = &mut self.fast[(rip ^ (rip >> 12)) as usize & (FAST_SLOTS - 1)];

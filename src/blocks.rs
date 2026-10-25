@@ -140,13 +140,26 @@ impl Emu {
             #[cfg(target_arch = "wasm32")]
             if self.jit.on {
                 let bits = self.bits();
-                if let Some((f, entry)) = self.jit.get(&self.mem, bits, rip, 256, &self.cpu.regs) {
-                    self.cpu.jit_entry = entry;
+                if let Some((mut f, mut entry)) = self.jit.get(&self.mem, bits, rip, 256, &self.cpu.regs) {
                     let cpu_ptr = (&mut self.cpu as *mut crate::cpu::Cpu) as usize as u32;
-                    let n = f(cpu_ptr);
-                    self.cpu.steps += n as u64;
-                    self.jit_insns += n as u64;
-                    self.jit_calls += 1;
+                    // 抜けた先も変換済みなら、外の確認（戻りの印、ホストの関数、コードの書き換え、命令数の上限）を省いて続けて呼ぶ。
+                    // 中断したとき、ホストの関数か戻りの印に来たとき、直接の表に無いとき、命令が溜まったときは外へ戻る
+                    let mut n = 0u64;
+                    loop {
+                        self.cpu.jit_entry = entry;
+                        n += f(cpu_ptr) as u64;
+                        self.jit_calls += 1;
+                        let next = self.cpu.rip;
+                        if self.cpu.jit_bail != 0 || next >= crate::emu::RETURN_MAGIC || self.mem.code_dirty || n > 1 << 20 {
+                            break;
+                        }
+                        match self.jit.peek(next) {
+                            Some((g, e)) => (f, entry) = (g, e),
+                            None => break,
+                        }
+                    }
+                    self.cpu.steps += n;
+                    self.jit_insns += n;
                     if self.cpu.jit_bail != 0 {
                         // メモリの遅い道。その 1 命令だけインタープリターで進める
                         self.cpu.jit_bail = 0;
