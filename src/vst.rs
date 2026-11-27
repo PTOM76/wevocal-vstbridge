@@ -13,6 +13,9 @@ mod off {
     pub const NUM_INPUTS: u64 = 48;
     pub const NUM_OUTPUTS: u64 = 52;
     pub const PROCESS_REPLACING: u64 = 120;
+    // flags（int32）と uniqueID（int32）
+    pub const FLAGS: u64 = 56;
+    pub const UNIQUE_ID: u64 = 112;
 }
 
 const EFF_OPEN: u64 = 0;
@@ -137,6 +140,44 @@ impl Vst {
             return Ok(0);
         }
         self.emu.call(f, &[Arg::Int(self.effect), Arg::Int(opcode), Arg::Int(index), Arg::Int(value), Arg::Int(ptr), Arg::F32(opt)])
+    }
+
+    /// プラグインの識別番号（AEffect.uniqueID。ホストがプラグインを見分けるのに使う 4 文字）
+    pub fn unique_id(&self) -> R<u32> {
+        Ok(self.emu.mem.read_n(self.effect + off::UNIQUE_ID, 4)? as u32)
+    }
+
+    /// 状態をまとめた塊（chunk）を使うプラグインか（effFlagsProgramChunks）
+    pub fn uses_chunks(&self) -> R<bool> {
+        Ok(self.emu.mem.read_n(self.effect + off::FLAGS, 4)? & crate::vst32::FLAG_PROGRAM_CHUNKS != 0)
+    }
+
+    /// 状態の塊を取る（effGetChunk。preset なら今のプログラムだけ、そうでなければ全体）。使わないプラグインは None
+    pub fn get_chunk(&mut self, preset: bool) -> R<Option<Vec<u8>>> {
+        if !self.uses_chunks()? {
+            return Ok(None);
+        }
+        let out = self.emu.mem.alloc(8);
+        self.emu.mem.write_n(out, 8, 0)?;
+        let size = self.dispatch(crate::vst32::EFF_GET_CHUNK, preset as u64, 0, out, 0.0)? as usize;
+        let at = self.emu.mem.read_n(out, 8)?;
+        if size == 0 || at == 0 || size > crate::vst32::MAX_CHUNK {
+            return Ok(None);
+        }
+        let mut buf = vec![0u8; size];
+        self.emu.mem.read(at, &mut buf)?;
+        Ok(Some(buf))
+    }
+
+    /// 状態の塊を戻す（effSetChunk）
+    pub fn set_chunk(&mut self, data: &[u8], preset: bool) -> R<()> {
+        if data.is_empty() || data.len() > crate::vst32::MAX_CHUNK {
+            return Ok(());
+        }
+        let at = self.emu.mem.alloc(data.len());
+        self.emu.mem.write(at, data)?;
+        self.dispatch(crate::vst32::EFF_SET_CHUNK, preset as u64, data.len() as u64, at, 0.0)?;
+        Ok(())
     }
 
     pub fn set_param(&mut self, index: i32, value: f32) -> R<()> {

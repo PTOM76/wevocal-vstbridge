@@ -17,7 +17,16 @@ mod off {
     pub const NUM_OUTPUTS: u64 = 32;
     // 32 ビットの AEffect: offset 64 は object、68 は user、72 uniqueID、76 version、80 processReplacing
     pub const PROCESS_REPLACING: u64 = 80;
+    pub const FLAGS: u64 = 36;
+    pub const UNIQUE_ID: u64 = 72;
 }
+
+/// effFlagsProgramChunks（状態を塊で持つ）
+pub(crate) const FLAG_PROGRAM_CHUNKS: u64 = 1 << 5;
+pub(crate) const EFF_GET_CHUNK: u64 = 23;
+pub(crate) const EFF_SET_CHUNK: u64 = 24;
+/// 塊の大きさの上限（壊れた値で大きく確保しないように）
+pub(crate) const MAX_CHUNK: usize = 64 << 20;
 
 const VST_MAGIC: u64 = 0x5673_7450; // 'VstP'
 const EFF_OPEN: u64 = 0;
@@ -139,6 +148,44 @@ impl Vst32 {
         self.emu.call32(dispatcher, &[Arg::Int(self.effect as u64), Arg::Int(EFF_GET_PARAM_NAME), Arg::Int(index as u64), Arg::Int(0), Arg::Int(buf as u64), Arg::F32(0.0)])?;
         let name = self.emu.mem.read_cstr(buf as u64, 64)?;
         Ok(if name.is_empty() { format!("Param {index}") } else { name })
+    }
+
+    /// プラグインの識別番号（AEffect.uniqueID）
+    pub fn unique_id(&self) -> R<u32> {
+        Ok(self.emu.mem.read_n(self.effect as u64 + off::UNIQUE_ID, 4)? as u32)
+    }
+
+    /// 状態をまとめた塊（chunk）を使うプラグインか（effFlagsProgramChunks）
+    pub fn uses_chunks(&self) -> R<bool> {
+        Ok(self.emu.mem.read_n(self.effect as u64 + off::FLAGS, 4)? & FLAG_PROGRAM_CHUNKS != 0)
+    }
+
+    /// 状態の塊を取る（effGetChunk。preset なら今のプログラムだけ、そうでなければ全体）。使わないプラグインは None
+    pub fn get_chunk(&mut self, preset: bool) -> R<Option<Vec<u8>>> {
+        if !self.uses_chunks()? {
+            return Ok(None);
+        }
+        let out = self.emu.mem.alloc32(4) as u64;
+        self.emu.mem.write_n(out, 4, 0)?;
+        let size = self.dispatch(EFF_GET_CHUNK, preset as u64, 0, out, 0.0)? as usize;
+        let at = self.emu.mem.read_n(out, 4)?;
+        if size == 0 || at == 0 || size > MAX_CHUNK {
+            return Ok(None);
+        }
+        let mut buf = vec![0u8; size];
+        self.emu.mem.read(at, &mut buf)?;
+        Ok(Some(buf))
+    }
+
+    /// 状態の塊を戻す（effSetChunk）
+    pub fn set_chunk(&mut self, data: &[u8], preset: bool) -> R<()> {
+        if data.is_empty() || data.len() > MAX_CHUNK {
+            return Ok(());
+        }
+        let at = self.emu.mem.alloc32(data.len()) as u64;
+        self.emu.mem.write(at, data)?;
+        self.dispatch(EFF_SET_CHUNK, preset as u64, data.len() as u64, at, 0.0)?;
+        Ok(())
     }
 
     pub fn set_param(&mut self, index: i32, value: f32) -> R<()> {

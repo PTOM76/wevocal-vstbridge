@@ -194,6 +194,36 @@ impl JsVst {
         .map_err(|e| JsError::new(&e.0))
     }
 
+    /// プラグインの識別番号（AEffect.uniqueID）
+    #[wasm_bindgen(js_name = uniqueId)]
+    pub fn unique_id(&self) -> Result<u32, JsError> {
+        match &self.0 {
+            Plugin::X64(v) => v.unique_id(),
+            Plugin::X86(v) => v.unique_id(),
+        }
+        .map_err(|e| JsError::new(&e.0))
+    }
+
+    /// 状態の塊（effGetChunk の全体）。塊を使わないプラグインは undefined（つまみの値で足りる）
+    #[wasm_bindgen(js_name = getChunk)]
+    pub fn get_chunk(&mut self) -> Result<Option<Vec<u8>>, JsError> {
+        match &mut self.0 {
+            Plugin::X64(v) => v.get_chunk(false),
+            Plugin::X86(v) => v.get_chunk(false),
+        }
+        .map_err(|e| JsError::new(&e.0))
+    }
+
+    /// 状態の塊を戻す（effSetChunk の全体）
+    #[wasm_bindgen(js_name = setChunk)]
+    pub fn set_chunk(&mut self, data: &[u8]) -> Result<(), JsError> {
+        match &mut self.0 {
+            Plugin::X64(v) => v.set_chunk(data, false),
+            Plugin::X86(v) => v.set_chunk(data, false),
+        }
+        .map_err(|e| JsError::new(&e.0))
+    }
+
     #[wasm_bindgen(js_name = getParam)]
     pub fn get_param(&mut self, index: i32) -> Result<f32, JsError> {
         match &mut self.0 {
