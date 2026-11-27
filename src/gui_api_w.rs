@@ -73,6 +73,35 @@ fn put_dib(e: &mut Emu, dc: u32, (xd, yd, wd, hd): (i32, i32, i32, i32), (xs, ys
     Ok(hd as u64)
 }
 
+type Rect = (i32, i32, i32, i32);
+
+fn read_rect(e: &Emu, p: u64) -> R<Rect> {
+    let v = |k: u64| -> R<i32> { Ok(e.mem.read_n(p + k * 4, 4)? as u32 as i32) };
+    Ok((v(0)?, v(1)?, v(2)?, v(3)?))
+}
+
+fn empty(r: Rect) -> bool {
+    r.2 <= r.0 || r.3 <= r.1
+}
+
+fn region(e: &Emu, h: u32) -> Option<Rect> {
+    match e.gui.gdi.objs.get(&h) {
+        Some(Obj::Region(l, t, r, b)) => Some((*l, *t, *r, *b)),
+        _ => None,
+    }
+}
+
+/// 領域 h を長方形 r にする。戻り値は領域の種類（ERROR=0、NULLREGION=1、SIMPLEREGION=2）
+fn set_region(e: &mut Emu, h: u32, r: Rect) -> u64 {
+    match e.gui.gdi.objs.get_mut(&h) {
+        Some(o @ Obj::Region(..)) => {
+            *o = Obj::Region(r.0, r.1, r.2, r.3);
+            if empty(r) { 1 } else { 2 }
+        }
+        _ => 0,
+    }
+}
+
 pub fn resolve(name: &str) -> Option<HostFn> {
     match name {
         // ---- ウィンドウ ----
@@ -180,9 +209,39 @@ pub fn resolve(name: &str) -> Option<HostFn> {
             e.mem.write_n(ps + p + 16, 4, wh as u64)?;
             Ok(dc as u64)
         }),
-        // 更新する範囲は、いつもウィンドウ全体の長方形（SIMPLEREGION）
-        "GetUpdateRgn" | "CombineRgn" | "GetRgnBox" => boxed(|_| Ok(2)),
-        "CreateRectRgn" | "CreateRectRgnIndirect" => boxed(|e| Ok(e.gui.gdi.add(Obj::Brush { rgb: 0, hollow: true }) as u64)),
+        // 領域は長方形で持つ。戻り値は NULLREGION（1、空）か SIMPLEREGION（2）
+        "CreateRectRgn" => boxed(|e| Ok(e.gui.gdi.add(Obj::Region(i(e, 1)?, i(e, 2)?, i(e, 3)?, i(e, 4)?)) as u64)),
+        "CreateRectRgnIndirect" => boxed(|e| {
+            let r = read_rect(e, arg(e, 1)?)?;
+            Ok(e.gui.gdi.add(Obj::Region(r.0, r.1, r.2, r.3)) as u64)
+        }),
+        // 更新する範囲は、いつもウィンドウ全体（描き直しは全部のウィンドウへ送るため）
+        "GetUpdateRgn" => boxed(|e| {
+            let (h, rgn) = (a(e, 1)?, a(e, 2)?);
+            let r = e.gui.windows.get(&h).map(|w| (0, 0, w.w, w.h)).unwrap_or_default();
+            Ok(set_region(e, rgn, r))
+        }),
+        // CombineRgn(dst, a, b, mode)。RGN_AND=1、RGN_OR=2、RGN_XOR=3、RGN_DIFF=4、RGN_COPY=5（XOR と DIFF は a の長方形のまま）
+        "CombineRgn" => boxed(|e| {
+            let (dst, mode) = (a(e, 1)?, a(e, 4)?);
+            let (Some(p), q) = (region(e, a(e, 2)?), region(e, a(e, 3)?)) else { return Ok(0) };
+            let r = match (mode, q) {
+                (1, Some(q)) => (p.0.max(q.0), p.1.max(q.1), p.2.min(q.2), p.3.min(q.3)),
+                (2, Some(q)) if empty(p) => q,
+                (2, Some(q)) if !empty(q) => (p.0.min(q.0), p.1.min(q.1), p.2.max(q.2), p.3.max(q.3)),
+                _ => p,
+            };
+            Ok(set_region(e, dst, r))
+        }),
+        "GetRgnBox" => boxed(|e| {
+            let (rgn, p) = (a(e, 1)?, arg(e, 2)?);
+            let Some(r) = region(e, rgn) else { return Ok(0) };
+            let r = if empty(r) { (0, 0, 0, 0) } else { r };
+            for (k, v) in [r.0, r.1, r.2, r.3].iter().enumerate() {
+                e.mem.write_n(p + k as u64 * 4, 4, *v as u32 as u64)?;
+            }
+            Ok(if empty(r) { 1 } else { 2 })
+        }),
         "CreateDIBSection" => boxed(|e| {
             let (info, ppv) = (arg(e, 2)?, arg(e, 4)?);
             let (w, h, td, bpp) = bmi(e, info)?;

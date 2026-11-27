@@ -50,6 +50,8 @@ pub enum Obj {
     Pen { rgb: u32, width: i32, null: bool },
     Font { height: i32 },
     Dc(Dc),
+    /// 長方形の領域（左, 上, 右, 下）。複雑な形は外接する長方形で持つ
+    Region(i32, i32, i32, i32),
 }
 
 #[derive(Default)]
