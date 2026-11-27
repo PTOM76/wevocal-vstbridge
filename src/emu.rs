@@ -257,7 +257,7 @@ impl Emu {
     }
 
     /// Windows x86（32 ビット）の呼び出しの決まり（cdecl）で func を呼ぶ。引数は右から左の順でスタックに積む。
-    /// 戻ったあとのスタックの後始末は呼び出した側の仕事なので、呼ぶ前の esp に戻す（戻さないと、呼ぶたびに引数の分だけスタックが減り、再生を続けるうちに使い切る）
+    /// 戻ったあとのスタックの後始末は呼び出した側の仕事なので、呼ぶ前の esp に戻す（戻さないと、呼ぶたびに引数の分だけスタックが減り、再生を続けるうちに使い切る）。中断したときは戻さない
     pub fn call32(&mut self, func: u32, args: &[Arg]) -> R<u64> {
         let saved_esp = self.cpu.regs[RSP];
         for a in args.iter().rev() {
@@ -269,8 +269,9 @@ impl Emu {
         let saved = self.call_start;
         let r = self.run_nested();
         self.call_start = saved;
-        self.cpu.regs[RSP] = saved_esp;
+        // 中断（YIELD）で抜けたときは戻さない（中断した呼び出しのスタックを、次の処理が上書きしてしまう）
         r?;
+        self.cpu.regs[RSP] = saved_esp;
         Ok(self.cpu.regs[0] & 0xffff_ffff)
     }
 
