@@ -49,6 +49,8 @@ pub struct Gui {
     pub can_yield: bool,
     /// 中断したままの処理がある（次の入力か idle で resume する）
     pub pending: bool,
+    /// 中断した呼び出しの前のスタックの位置。終わったら戻す（中断で抜けた呼び出しは自分で戻せない）
+    pub pending_sp: u64,
     /// リソースを探すイメージの基点
     pub base: u64,
     /// CreateDIBSection で作ったビットマップ → (画素のゲストの番地, 幅, 高さ, 上の行から並ぶか, 1 画素のビット数)。描く前にゲストのメモリから写す
@@ -61,7 +63,7 @@ pub struct Gui {
 
 impl Gui {
     pub fn new() -> Gui {
-        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, base: 0x1000_0000, dibs: HashMap::new(), posted: Vec::new(), fonts: Default::default() }
+        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, pending_sp: 0, base: 0x1000_0000, dibs: HashMap::new(), posted: Vec::new(), fonts: Default::default() }
     }
 
     /// ウィンドウを作る（描く面は bg で塗る）。ハンドルを返す
@@ -199,6 +201,7 @@ impl Emu {
         let (hwnd, lx, ly) = self.gui.hit(x, y);
         // MK_LBUTTON=1、MK_SHIFT=4、MK_CONTROL=8
         let mk = (keys & 1) | ((keys >> 1 & 1) << 3) | ((keys >> 2 & 1) << 2);
+        let sp = self.cpu.regs[crate::cpu::RSP];
         self.gui.can_yield = true;
         let r = self.send_message(hwnd, msg, mk, ((ly as u32 & 0xffff) << 16) | (lx as u32 & 0xffff));
         self.gui.can_yield = false;
@@ -206,6 +209,7 @@ impl Emu {
             Ok(_) => self.paint_all(),
             Err(f) if f.0 == crate::emu::YIELD => {
                 self.gui.pending = true;
+                self.gui.pending_sp = sp;
                 Ok(())
             }
             Err(f) => Err(f),
@@ -214,18 +218,23 @@ impl Emu {
 
     /// 中断した処理を動かす。まだ終わらなければ true（また中断した）。終わったら false
     pub fn resume_pending(&mut self) -> R<bool> {
+        // 続きは、中断した呼び出し（入力のメッセージ）と同じ深さで動かす
         self.gui.can_yield = true;
+        self.depth += 1;
         let r = self.resume();
+        self.depth -= 1;
         self.gui.can_yield = false;
         match r {
             Ok(()) => {
                 self.gui.pending = false;
+                self.cpu.regs[crate::cpu::RSP] = self.gui.pending_sp;
                 self.paint_all()?;
                 Ok(false)
             }
             Err(f) if f.0 == crate::emu::YIELD => Ok(true),
             Err(f) => {
                 self.gui.pending = false;
+                self.cpu.regs[crate::cpu::RSP] = self.gui.pending_sp;
                 Err(f)
             }
         }

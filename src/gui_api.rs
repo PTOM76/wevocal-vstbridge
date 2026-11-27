@@ -167,7 +167,8 @@ fn resolve_inner(name: &str) -> Option<HostFn> {
         "GetAsyncKeyState" => boxed(|e| {
             let vk = a(e, 1)?;
             // 左ボタンを調べるのは、押している間ずっと待つループ（つまみのドラッグ）。ここで中断して、次の入力を待つ
-            if vk == 1 && e.gui.can_yield {
+            // 入れ子の呼び出しの中では中断しない（外側の呼び出しの続きを再開で動かせない）
+            if vk == 1 && e.gui.can_yield && e.depth == 1 {
                 e.yield_req = true;
             }
             let bit = match vk {

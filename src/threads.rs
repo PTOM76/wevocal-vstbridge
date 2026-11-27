@@ -41,7 +41,7 @@ struct Thread {
 pub struct Threads {
     list: Vec<Thread>,
     /// 今動かしているスレッドの添字（None はメインのスレッド）
-    cur: Option<usize>,
+    pub(crate) cur: Option<usize>,
     /// イベントのハンドル → (合図が立っているか, 手動で戻すか)
     events: HashMap<u64, (bool, bool)>,
     next: u64,
@@ -74,8 +74,11 @@ fn now(e: &mut Emu) -> u64 {
     crate::win_stubs::clock_ms(e)
 }
 
-/// スレッドの中なら、条件を置いて中断する
+/// スレッドの中なら、条件を置いて中断する。ホストの関数から入れ子で呼ばれたところでは中断しない（外側の呼び出しの続きを再開で動かせない）
 fn block(e: &mut Emu, w: Wait) {
+    if e.depth > 0 {
+        return;
+    }
     if let Some(k) = e.threads.cur {
         e.threads.list[k].wait = w;
         e.yield_req = true;
@@ -109,13 +112,15 @@ impl Emu {
             self.threads.list[k].wait = Wait::Run;
             // Cpu を入れ替えて動かす
             std::mem::swap(&mut self.cpu, &mut self.threads.list[k].cpu);
-            let (saved_max, saved_start) = (self.max_steps, self.call_start);
+            let (saved_max, saved_start, saved_depth) = (self.max_steps, self.call_start, self.depth);
             self.max_steps = BUDGET;
+            self.depth = 0;
             self.threads.cur = Some(k);
             let r = self.resume();
             self.threads.cur = None;
             self.max_steps = saved_max;
             self.call_start = saved_start;
+            self.depth = saved_depth;
             std::mem::swap(&mut self.cpu, &mut self.threads.list[k].cpu);
             match r {
                 Ok(()) => self.threads.list[k].wait = Wait::Done,

@@ -21,4 +21,17 @@ for (const y of [40, 25, 10]) { v.editorMouse(0x200, 73, y, 1); v.editorIdle() }
 const ch1 = Array.from(v.editorChanges())
 v.editorMouse(0x202, 73, 10, 0); v.editorIdle()
 if (ch1.length < 2 || ch1[0] !== 0 || !(ch1.at(-1) > 0.5)) throw new Error('つまみが動かない ' + ch1)
+// ドラッグを繰り返しても動き続けること（中断のたびにスタックがずれると、いずれ止まる）
+for (let n = 0; n < 200; n++) {
+  const y0 = n % 2 ? 10 : 90
+  v.editorMouse(0x201, 73, 50, 1); v.editorIdle()
+  v.editorMouse(0x200, 73, y0, 1); v.editorIdle()
+  v.editorMouse(0x202, 73, y0, 0); v.editorIdle()
+}
+v.editorChanges()
+v.editorMouse(0x201, 73, 50, 1); v.editorIdle()
+v.editorMouse(0x200, 73, 90, 1); v.editorIdle()
+v.editorMouse(0x202, 73, 90, 0); v.editorIdle()
+const ch2 = Array.from(v.editorChanges())
+if (ch2.length < 2) throw new Error('繰り返しのあとでつまみが動かない')
 console.log(`ok（${w}x${h}、絵素 ${different}、変更 ${ch1.length / 2} 回、最後 ${ch1.at(-1).toFixed(3)}）`)

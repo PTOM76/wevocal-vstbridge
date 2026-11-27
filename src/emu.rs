@@ -70,6 +70,8 @@ pub struct Emu {
     pub(crate) call_start: u64,
     /// ホストの関数が「ここで中断してほしい」と要求した（run が YIELD で止まる。再開は resume）
     pub yield_req: bool,
+    /// 入れ子の呼び出し（call、call32）の深さ。中断してよいのは、再開で続きを動かせる深さのときだけ（外側の呼び出しの続きは再開で動かせない）
+    pub depth: u32,
     /// step_call で少しずつ進めている間 true（ホストの関数の中からの入れ子の呼び出しは、途中で止めずに最後まで動かす）
     slicing: bool,
     /// プラグインが作ったスレッド（threads.rs。交代で少しずつ動かす）
@@ -157,7 +159,7 @@ impl Emu {
             let _ = mem.write_n(teb + 0x1020, 8, teb + 0x1800);
             cpu.fs_base = teb;
         }
-        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), heap_free: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, slicing: false, threads: Default::default(), trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_calls: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
+        Emu { cpu, mem, bits, thunks: HashMap::new(), next_thunk: THUNK_BASE, loaded: Vec::new(), procs: HashMap::new(), heap_sizes: HashMap::new(), heap_free: HashMap::new(), image_base: 0, max_steps: MAX_STEPS, nan_watch: std::env::var("VSTBRIDGE_NAN").is_ok(), call_start: 0, yield_req: false, depth: 0, slicing: false, threads: Default::default(), trace: std::env::var("VSTBRIDGE_TRACE").is_ok(), decoded: HashMap::default(), blocks: Default::default(), jit: Default::default(), jit_insns: 0, jit_calls: 0, jit_miss: HashMap::new(), interp_insns: 0, gui: crate::gui::Gui::new(), use_fast: std::env::var("VSTBRIDGE_NOFAST").is_err() && std::env::var("VSTBRIDGE_TRACE").is_err() && std::env::var("VSTBRIDGE_NAN").is_err(), prof: if std::env::var("VSTBRIDGE_PROF").is_ok() { Some(HashMap::new()) } else { None } }
     }
 
     /// ホストの関数に入口の番地を 1 つ割り当てる（その番地へ飛ぶと f が呼ばれる）
@@ -181,13 +183,36 @@ impl Emu {
         let saved_rsp = self.begin_call64(func, args)?;
         let r = self.run_nested();
         self.call_start = saved_start;
-        r?;
-        self.cpu.regs[RSP] = saved_rsp;
+        self.end_call(r, saved_rsp)?;
         Ok(self.cpu.regs[0])
     }
 
-    /// 入れ子の呼び出しを動かす。少しずつ進めている（step_call）途中なら、止めずに最後まで動かす
+    /// 呼び出しの後始末。スタックを呼ぶ前に戻す。中断（YIELD）で抜けたときは戻さない（中断した呼び出しのスタックを、次の処理が上書きしてしまう）
+    fn end_call(&mut self, r: R<()>, saved_sp: u64) -> R<()> {
+        match r {
+            Err(f) if f.0 == YIELD => Err(f),
+            r => {
+                self.cpu.regs[RSP] = saved_sp;
+                r
+            }
+        }
+    }
+
+    /// 入れ子の呼び出しを動かす。少しずつ進めている（step_call）途中やスレッドの中でも、止めずに最後まで動かす（途中で抜けると、外側の呼び出しの続きを再開で動かせない）
     fn run_nested(&mut self) -> R<()> {
+        self.depth += 1;
+        let r = self.run_nested_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn run_nested_inner(&mut self) -> R<()> {
+        if self.threads.cur.is_some() && !self.slicing {
+            let saved = std::mem::replace(&mut self.max_steps, MAX_STEPS);
+            let r = self.run();
+            self.max_steps = saved;
+            return r;
+        }
         if !self.slicing {
             return self.run();
         }
@@ -269,9 +294,7 @@ impl Emu {
         let saved = self.call_start;
         let r = self.run_nested();
         self.call_start = saved;
-        // 中断（YIELD）で抜けたときは戻さない（中断した呼び出しのスタックを、次の処理が上書きしてしまう）
-        r?;
-        self.cpu.regs[RSP] = saved_esp;
+        self.end_call(r, saved_esp)?;
         Ok(self.cpu.regs[0] & 0xffff_ffff)
     }
 
