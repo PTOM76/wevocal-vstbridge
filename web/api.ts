@@ -5,3 +5,4 @@ export { createVstSnapshot, paramsFromChunk, chunkFromParams, type VstSnapshot }
 export { openEditor, releaseEditors, type EditorEvents, type EditorSession } from './guiEngine'
 export { openRemoteEditor, releaseRemoteEditors, type RemoteResult } from './guiRemote'
 export { mountVstEditor, type VstEditorOptions, type VstEditorHandle } from './editor'
+export { inspectVst, type VstInspection } from './inspect'
