@@ -4,6 +4,8 @@ Set-Location $PSScriptRoot
 cargo build --target wasm32-unknown-unknown --release --lib
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 wasm-bindgen target/wasm32-unknown-unknown/release/vstbridge.wasm --out-dir pkg --target nodejs
+# pkg/ は CommonJS（ルートの package.json は type: module なので、ここで戻す）
+Set-Content -Path pkg/package.json -Value '{ "type": "commonjs" }' -Encoding ascii
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 wasm-bindgen target/wasm32-unknown-unknown/release/vstbridge.wasm --out-dir pkg-web --target web
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

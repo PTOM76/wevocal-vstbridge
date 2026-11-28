@@ -9,12 +9,21 @@
     "url": "git+https://github.com/PTOM76/wevocal-vstbridge.git"
   },
   "exports": {
-    ".": "./web/api.ts"
+    ".": {
+      "types": "./dist/api.d.ts",
+      "default": "./dist/api.js"
+    },
+    "./wasm": "./dist/vstbridge_bg.wasm"
   },
   "files": [
-    "web",
+    "dist",
     "LICENSE",
     "README.md"
   ],
-  "sideEffects": false
+  "sideEffects": false,
+  "type": "module",
+  "scripts": {
+    "build:npm": "node scripts/build-npm.mjs",
+    "prepublishOnly": "node scripts/build-npm.mjs"
+  }
 }

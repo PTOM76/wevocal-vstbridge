@@ -86,6 +86,17 @@ node scripts/export-to-lib.mjs ../wevocalsynth/wevocal-lib/
 
 書き出したあとは wevocal-lib でコミットし、Synth と Studio の submodule を更新する。
 
+### npm のパッケージ
+
+```bash
+./build-wasm.sh
+node scripts/export-to-lib.mjs    # web/ をそろえる（lib のフォルダーを渡すと lib にも写す）
+npm run build:npm                 # web/ の TS を JS と型定義にして dist/ に書き出す
+npm publish
+```
+
+`dist/` は生成物（リポジトリに含めない）。Worker のファイルは `new URL('./x.js', import.meta.url)` で読むので、使う側のバンドラー（Vite など）が Worker として扱う。入口は `wevocal-vstbridge`（`dist/api.js`）、wasm は `wevocal-vstbridge/wasm`。
+
 ### ブラウザ（実機）で確かめる
 
 ```bash

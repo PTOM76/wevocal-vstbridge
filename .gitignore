@@ -12,3 +12,4 @@ web/vstbridge.js
 web/vstbridge.d.ts
 web/vstbridge_bg.wasm
 web/workletGlue.ts
+/dist/

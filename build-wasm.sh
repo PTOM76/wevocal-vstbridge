@@ -4,5 +4,7 @@
 set -e
 cargo build --target wasm32-unknown-unknown --release --lib
 wasm-bindgen target/wasm32-unknown-unknown/release/vstbridge.wasm --out-dir pkg --target nodejs
+# pkg/ は CommonJS（ルートの package.json は type: module なので、ここで戻す）
+echo '{ "type": "commonjs" }' > pkg/package.json
 wasm-bindgen target/wasm32-unknown-unknown/release/vstbridge.wasm --out-dir pkg-web --target web
 echo "pkg/（Node）と pkg-web/（ブラウザ）を作った"
