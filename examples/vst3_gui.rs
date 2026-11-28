@@ -31,12 +31,24 @@ fn main() {
         }
     }
     println!("当たる窓 {:?}", p.emu.gui.hit(x, y));
-    p.editor_mouse(0x201, x, y, 1).expect("down");
-    for k in 1..20 {
-        p.editor_mouse(0x200, x, y - k * 3, 1).expect("move");
+    // 押す前に、窓の上へカーソルを動かしておく（入ったことを知らせる）
+    for k in (0..5).rev() {
+        p.editor_mouse(0x200, x + k * 4, y, 0).expect("hover");
         p.editor_idle().expect("idle");
     }
-    p.editor_mouse(0x202, x, y - 60, 0).expect("up");
+    p.editor_mouse(0x201, x, y, 1).expect("down");
+    p.editor_idle().expect("idle");
+    // 5 番目の引数が click なら、動かさずに離す（ボタン）
+    let click = args.get(5).is_some_and(|s| s == "click");
+    let dy = if click { 0 } else { 3 };
+    for k in 1..20 {
+        p.editor_mouse(0x200, x, y - k * dy, 1).expect("move");
+        p.editor_idle().expect("idle");
+    }
+    p.editor_mouse(0x202, x, y - 19 * dy, 0).expect("up");
+    for _ in 0..5 {
+        p.editor_idle().expect("idle");
+    }
     p.editor_idle().expect("idle");
     let after = p.editor_frame().expect("frame").2;
     println!("ドラッグで変わった画素 {}", px.chunks(4).zip(after.chunks(4)).filter(|(a, b)| a != b).count());

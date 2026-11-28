@@ -169,6 +169,17 @@ pub fn resolve(name: &str) -> Option<HostFn> {
             Ok(1)
         }),
 "TranslateMessage" | "SetWindowTextW" | "TrackMouseEvent" | "SetFocus" | "SetCapture" | "ReleaseCapture" | "ValidateRect" => boxed(|_| Ok(1)),
+        // 窓を作ったスレッド（どの窓もメインのスレッドで作る。id は GetCurrentThreadId のメインと同じ 1）と、プロセスの id（あれば書く）。
+        // JUCE は今のスレッドと比べて、窓のスレッドかどうかを見る
+        "GetWindowThreadProcessId" => boxed(|e| {
+            let pid = arg(e, 2)?;
+            if pid != 0 {
+                e.mem.write_n(pid, 4, 1)?;
+            }
+            Ok(1)
+        }),
+        // 前面の窓と、マウスを捕まえている窓は、どちらもプラグインの画面の窓（ルート）とする
+        "GetForegroundWindow" | "GetActiveWindow" | "GetFocus" => boxed(|e| Ok(e.gui.root as u64)),
         "LoadCursorW" | "LoadIconW" => boxed(|_| Ok(1)),
         // 描き直しは idle のたびに全部のウィンドウへ WM_PAINT を送る（paint_all）ので、ここでは何もしない
         "InvalidateRect" | "UpdateWindow" | "RedrawWindow" => boxed(|_| Ok(1)),
