@@ -43,6 +43,31 @@ x64 の PE（DLL）を読み込み、命令を 1 つずつ実行して、VST2 �
 | PE の解析 | [object](https://crates.io/crates/object) |
 | wasm 化 | [wasm-bindgen](https://crates.io/crates/wasm-bindgen)（`wasm32-unknown-unknown`） |
 
+## 使い方（npm）
+```bash
+npm install wevocal-vstbridge
+```
+
+Worker を `new URL('./x.js', import.meta.url)` で読むので、Vite などのバンドラーで使う。
+
+```ts
+import { inspectVst, mountVstEditor, vstProcessorSource } from 'wevocal-vstbridge'
+import wasmUrl from 'wevocal-vstbridge/wasm?url'
+
+const wasm = await fetch(wasmUrl).then((r) => r.arrayBuffer())
+// DLL を Worker で読み込み、名前とつまみを調べる
+const info = await inspectVst(wasm, dll)
+// AudioWorklet の processor を登録し、ノードを作る（つまみは p0、p1、… の AudioParam）
+const name = 'my-vst'
+const url = URL.createObjectURL(new Blob([vstProcessorSource(name, name, info.params.map((_, i) => `p${i}`), info.params.map((p) => p.value))], { type: 'text/javascript' }))
+await ctx.audioWorklet.addModule(url)
+const node = new AudioWorkletNode(ctx, name, { outputChannelCount: [2], processorOptions: { wasm, dll } })
+// VST 自身の画面を要素に出す（画面を持たなければ null）
+const editor = await mountVstEditor({ el, wasm, dll, key: name, values: info.params.map((p) => p.value), onChange: (i, v) => node.parameters.get(`p${i}`)?.setValueAtTime(v, ctx.currentTime) })
+```
+
+使用例は [WeVocalEffect](https://github.com/PTOM76/wevocaleffect) と、wevocal-lib の `web/src/plugins/vst/`。
+
 ## セットアップ
 ```bash
 git clone git@github.com:PTOM76/wevocal-vstbridge.git
