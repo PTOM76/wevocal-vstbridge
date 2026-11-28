@@ -26,6 +26,8 @@ pub mod threads;
 pub mod timeinfo;
 pub mod vst;
 pub mod vst32;
+pub mod vst3;
+pub mod vst3_process;
 pub mod vst32_gui;
 pub mod win32_args;
 pub mod win_stubs;
