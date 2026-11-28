@@ -30,6 +30,41 @@ pub const IID_ICOMPONENT: [u8; 16] = tuid(0xE831FF31, 0xF2D54301, 0x928EBBEE, 0x
 pub const IID_IAUDIOPROCESSOR: [u8; 16] = tuid(0x42043F99, 0xB7DA453C, 0xA569E79D, 0x9AAEC33D);
 pub const IID_IEDITCONTROLLER: [u8; 16] = tuid(0xDCD7BBE3, 0x7742448D, 0xA874AACC, 0x979C759E);
 pub const IID_IHOSTAPPLICATION: [u8; 16] = tuid(0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5);
+pub const IID_IPARAMETERCHANGES: [u8; 16] = tuid(0xA4779663, 0x0BB64A56, 0xB44384A8, 0x466FEB9D);
+pub const IID_IPARAMVALUEQUEUE: [u8; 16] = tuid(0x01263A18, 0xED074F6F, 0x98C9D356, 0x4686F9BA);
+
+/// つまみの情報（ParameterInfo: id、title、shortTitle、units（UTF-16 の 128 文字ずつ）、stepCount、defaultNormalizedValue、unitId、flags）
+#[derive(Clone, Debug)]
+pub struct ParamInfo {
+    pub id: u32,
+    pub title: String,
+    pub units: String,
+    pub steps: i32,
+    pub default: f64,
+    pub flags: i32,
+}
+
+/// つまみのフラグ（kIsReadOnly、kIsHidden、kIsBypass）
+pub const PARAM_READ_ONLY: i32 = 1 << 1;
+pub const PARAM_HIDDEN: i32 = 1 << 4;
+pub const PARAM_BYPASS: i32 = 1 << 16;
+
+/// 次の process で渡す、つまみの値の変化（id と 0〜1 の値）
+type Pending = std::rc::Rc<std::cell::RefCell<Vec<(u32, f64)>>>;
+/// 1 回の process で渡せるつまみの数
+const QUEUES: usize = 256;
+
+fn read_wstr(emu: &Emu, at: u64, max: usize) -> R<String> {
+    let mut units = Vec::new();
+    for i in 0..max {
+        let u = emu.mem.read_n(at + i as u64 * 2, 2)? as u16;
+        if u == 0 {
+            break;
+        }
+        units.push(u);
+    }
+    Ok(String::from_utf16_lossy(&units))
+}
 
 /// 結果の値（Windows の COM と同じ）
 pub const K_RESULT_OK: u64 = 0;
@@ -37,10 +72,22 @@ pub const K_NO_INTERFACE: u64 = 0x8000_4002;
 
 /// ホストの側のオブジェクトを作る。関数の表は queryInterface、addRef、release のあとに methods。queryInterface は iids（と FUnknown）なら自分を返す
 pub fn host_object(emu: &mut Emu, iids: Vec<[u8; 16]>, methods: Vec<crate::emu::HostFn>) -> R<u64> {
-    let n = 3 + methods.len();
-    let table = emu.mem.alloc(n * 8);
+    let table = host_table(emu, iids, methods)?;
+    host_instance(emu, table, 0)
+}
+
+/// 同じ関数の表を持つオブジェクトを作る（16 バイト: 関数の表、その後ろに自由に使える値 1 つ）
+pub fn host_instance(emu: &mut Emu, table: u64, value: u64) -> R<u64> {
     let obj = emu.mem.alloc(16);
     emu.mem.write_n(obj, 8, table)?;
+    emu.mem.write_n(obj + 8, 8, value)?;
+    Ok(obj)
+}
+
+/// ホストの側のオブジェクトの関数の表を作る（host_instance で何個でもオブジェクトにできる）
+pub fn host_table(emu: &mut Emu, iids: Vec<[u8; 16]>, methods: Vec<crate::emu::HostFn>) -> R<u64> {
+    let n = 3 + methods.len();
+    let table = emu.mem.alloc(n * 8);
     let qi = emu.add_thunk(Box::new(move |e: &mut Emu| {
         let (this, iid, out) = (crate::host_stubs::arg(e, 1)?, crate::host_stubs::arg(e, 2)?, crate::host_stubs::arg(e, 3)?);
         let mut id = [0u8; 16];
@@ -60,7 +107,7 @@ pub fn host_object(emu: &mut Emu, iids: Vec<[u8; 16]>, methods: Vec<crate::emu::
     for (i, f) in fns.iter().enumerate() {
         emu.mem.write_n(table + i as u64 * 8, 8, *f)?;
     }
-    Ok(obj)
+    Ok(table)
 }
 
 /// UTF-16 の文字列を書く（0 で終える）
@@ -93,6 +140,12 @@ pub struct Vst3Plugin {
     pub emu: Emu,
     pub component: u64,
     pub processor: u64,
+    /// IEditController（別のクラスか、component と同じオブジェクト。無ければ 0）
+    pub controller: u64,
+    pub params: Vec<ParamInfo>,
+    pending: Pending,
+    /// IParameterChanges（process に渡す）
+    changes: u64,
     /// 入力と出力のチャンネルの数（最初のバスだけをステレオで使う。無ければ 0）
     pub inputs: usize,
     pub outputs: usize,
@@ -107,6 +160,7 @@ impl Vst3Plugin {
         let mut emu = v.emu;
         emu.max_steps = crate::emu::LOAD_MAX_STEPS;
         // ホスト（IHostApplication: getName(String128)、createInstance(cid, iid, obj)）
+        let make = crate::vst3_host::message_factory(&mut emu)?;
         let host = host_object(
             &mut emu,
             vec![IID_IHOSTAPPLICATION],
@@ -116,14 +170,8 @@ impl Vst3Plugin {
                     write_wstr(e, at, "WeVocal", 128)?;
                     Ok(K_RESULT_OK)
                 }),
-                // ホストが作るもの（IMessage など）はまだ用意しない
-                Box::new(|e: &mut Emu| {
-                    let out = crate::host_stubs::arg(e, 4)?;
-                    if out != 0 {
-                        e.mem.write_n(out, 8, 0)?;
-                    }
-                    Ok(K_NO_INTERFACE)
-                }),
+                // ホストが作るもの（IMessage、IAttributeList。音の処理とコントローラーのやり取りに使う）
+                Box::new(move |e: &mut Emu| crate::vst3_host::create_instance(e, &make)),
             ],
         )?;
         let cid = emu.mem.alloc(16);
@@ -171,11 +219,121 @@ impl Vst3Plugin {
         emu.mem.write_n(setup + 8, 4, BLOCK_MAX as u64)?;
         emu.mem.write_n(setup + 16, 8, sample_rate.to_bits())?;
         vcall(&mut emu, processor, 7, &[Arg::Int(setup)])?;
+        // コントローラー（IComponent::getControllerClassId で別のクラスなら作る。無ければ component が兼ねているか queryInterface で見る）
+        let ctrl_cid = emu.mem.alloc(16);
+        emu.mem.write(ctrl_cid, &[0u8; 16])?;
+        vcall(&mut emu, component, 5, &[Arg::Int(ctrl_cid)])?;
+        let mut cc = [0u8; 16];
+        emu.mem.read(ctrl_cid, &mut cc)?;
+        emu.mem.write(iid, &IID_IEDITCONTROLLER)?;
+        emu.mem.write_n(out, 8, 0)?;
+        let controller = if cc != [0u8; 16] && cc != class.cid {
+            let r = vcall(&mut emu, v.factory, 6, &[Arg::Int(ctrl_cid), Arg::Int(iid), Arg::Int(out)])?;
+            let c = emu.mem.read_n(out, 8)?;
+            if r as u32 == 0 && c != 0 {
+                vcall(&mut emu, c, 3, &[Arg::Int(host)])?;
+                // 音の処理とコントローラーをつなぐ（IConnectionPoint::connect を両方から。JUCE などはここで互いを知る）
+                crate::vst3_host::connect(&mut emu, component, c)?;
+            }
+            c
+        } else {
+            vcall(&mut emu, component, 0, &[Arg::Int(iid), Arg::Int(out)])?;
+            emu.mem.read_n(out, 8)?
+        };
+        // つまみの一覧（IEditController::getParameterCount、getParameterInfo）
+        let mut params = Vec::new();
+        if controller != 0 {
+            let n = vcall(&mut emu, controller, 8, &[])? as u32 as i32;
+            let info = emu.mem.alloc(800);
+            for i in 0..n.max(0) {
+                if vcall(&mut emu, controller, 9, &[Arg::Int(i as u64), Arg::Int(info)])? as u32 != 0 {
+                    continue;
+                }
+                params.push(ParamInfo {
+                    id: emu.mem.read_n(info, 4)? as u32,
+                    title: read_wstr(&emu, info + 4, 128)?,
+                    units: read_wstr(&emu, info + 516, 128)?,
+                    steps: emu.mem.read_n(info + 772, 4)? as u32 as i32,
+                    default: f64::from_bits(emu.mem.read_n(info + 776, 8)?),
+                    flags: emu.mem.read_n(info + 788, 4)? as u32 as i32,
+                });
+            }
+        }
+        // つまみの変化を process に渡す IParameterChanges と、つまみごとの IParamValueQueue（オブジェクトの後ろの値が pending の何番目か）
+        let pending: Pending = Default::default();
+        let (p1, p2) = (pending.clone(), pending.clone());
+        let queue_table = host_table(
+            &mut emu,
+            vec![IID_IPARAMVALUEQUEUE],
+            vec![
+                // getParameterId()
+                Box::new(move |e: &mut Emu| {
+                    let k = e.mem.read_n(crate::host_stubs::arg(e, 1)? + 8, 8)? as usize;
+                    Ok(p1.borrow().get(k).map(|x| x.0).unwrap_or(0) as u64)
+                }),
+                // getPointCount()
+                Box::new(|_e: &mut Emu| Ok(1)),
+                // getPoint(index, sampleOffset, value)。ブロックの頭で 1 つ
+                Box::new(move |e: &mut Emu| {
+                    let k = e.mem.read_n(crate::host_stubs::arg(e, 1)? + 8, 8)? as usize;
+                    let (off, val) = (crate::host_stubs::arg(e, 3)?, crate::host_stubs::arg(e, 4)?);
+                    let v = p2.borrow().get(k).map(|x| x.1).unwrap_or(0.0);
+                    e.mem.write_n(off, 4, 0)?;
+                    e.mem.write_n(val, 8, v.to_bits())?;
+                    Ok(K_RESULT_OK)
+                }),
+                // addPoint（プラグインからは足さない）
+                Box::new(|_e: &mut Emu| Ok(1)),
+            ],
+        )?;
+        let queues: Vec<u64> = (0..QUEUES).map(|k| host_instance(&mut emu, queue_table, k as u64)).collect::<R<_>>()?;
+        let p3 = pending.clone();
+        let changes = host_object(
+            &mut emu,
+            vec![IID_IPARAMETERCHANGES],
+            vec![
+                // getParameterCount()
+                Box::new(move |_e: &mut Emu| Ok(p3.borrow().len().min(QUEUES) as u64)),
+                // getParameterData(index)
+                Box::new(move |e: &mut Emu| {
+                    let k = crate::host_stubs::arg(e, 2)? as u32 as usize;
+                    Ok(queues.get(k).copied().unwrap_or(0))
+                }),
+                // addParameterData（プラグインからは足さない）
+                Box::new(|_e: &mut Emu| Ok(0)),
+            ],
+        )?;
         // IComponent::setActive(true)、IAudioProcessor::setProcessing(true)
         vcall(&mut emu, component, 11, &[Arg::Int(1)])?;
         vcall(&mut emu, processor, 8, &[Arg::Int(1)])?;
         emu.max_steps = crate::emu::MAX_STEPS;
-        Ok(Vst3Plugin { emu, component, processor, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None })
+        Ok(Vst3Plugin { emu, component, processor, controller, params, pending, changes, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None })
+    }
+
+    /// つまみ index（params の順）を 0〜1 の値にする。次の process で処理に渡し、コントローラーにも知らせる
+    pub fn set_param(&mut self, index: usize, value: f64) -> R<()> {
+        let Some(p) = self.params.get(index) else { return Ok(()) };
+        let id = p.id;
+        {
+            let mut q = self.pending.borrow_mut();
+            q.retain(|x| x.0 != id);
+            q.push((id, value));
+        }
+        if self.controller != 0 {
+            // IEditController::setParamNormalized(id, value)
+            vcall(&mut self.emu, self.controller, 15, &[Arg::Int(id as u64), Arg::F64(value)])?;
+        }
+        Ok(())
+    }
+
+    /// つまみ index の今の値（0〜1。IEditController::getParamNormalized）
+    pub fn get_param(&mut self, index: usize) -> R<f64> {
+        let Some(p) = self.params.get(index) else { return Ok(0.0) };
+        if self.controller == 0 {
+            return Ok(p.default);
+        }
+        vcall(&mut self.emu, self.controller, 14, &[Arg::Int(p.id as u64)])?;
+        Ok(f64::from_bits(self.emu.cpu.xmm[0] as u64))
     }
 
     /// 音を通す（入力と出力はステレオ。frames は BLOCK_MAX まで）
@@ -226,8 +384,13 @@ impl Vst3Plugin {
             d[..n].copy_from_slice(&src[..n]);
             self.emu.mem.write_f32s(*b, &d)?;
         }
+        // 変えたつまみがあれば、inputParameterChanges で渡す（渡したら空にする）
+        let any = !self.pending.borrow().is_empty();
+        self.emu.mem.write_n(data + 40, 8, if any { self.changes } else { 0 })?;
         // IAudioProcessor::process(data)
-        vcall(&mut self.emu, self.processor, 9, &[Arg::Int(data)])?;
+        let r = vcall(&mut self.emu, self.processor, 9, &[Arg::Int(data)]);
+        self.pending.borrow_mut().clear();
+        r?;
         out_bufs.iter().map(|b| self.emu.mem.read_f32s(*b, frames)).collect()
     }
 }
