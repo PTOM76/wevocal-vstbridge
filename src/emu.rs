@@ -167,11 +167,13 @@ impl Emu {
         self.add_thunk_stdcall(f, 0)
     }
 
-    /// stdcall のホスト関数。呼ばれた側（ここ）が引数を args 個ぶん片付ける（Windows の API はほとんどこれ）
+    /// stdcall のホスト関数。呼ばれた側（ここ）が引数を args 個ぶん片付ける（Windows の API はほとんどこれ）。
+    /// 64 ビットは呼んだ側が片付ける決まりなので片付けない（GetProcAddress で引いた関数も、32 ビットか 64 ビットかで分ける）
     pub fn add_thunk_stdcall(&mut self, f: HostFn, args: u64) -> u64 {
         let at = self.next_thunk;
         self.next_thunk += self.cpu.width as u64;
-        self.thunks.insert(at, (std::rc::Rc::from(f), args * self.cpu.width as u64));
+        let pop = if self.bits == 32 { args * 4 } else { 0 };
+        self.thunks.insert(at, (std::rc::Rc::from(f), pop));
         at
     }
 

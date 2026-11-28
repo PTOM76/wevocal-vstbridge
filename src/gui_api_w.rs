@@ -195,6 +195,26 @@ pub fn resolve(name: &str) -> Option<HostFn> {
             }
             Ok(1)
         }),
+        // DPI の扱いは「モニターごと（V2）」と答える（DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4、DPI_AWARENESS_PER_MONITOR_AWARE = 2）。画面は 96 DPI の 1 枚（GetDpiForWindow）
+        "GetThreadDpiAwarenessContext" | "GetWindowDpiAwarenessContext" | "SetThreadDpiAwarenessContext" => boxed(|e| Ok(if e.bits() == 64 { (-4i64) as u64 } else { (-4i32) as u32 as u64 })),
+        "GetAwarenessFromDpiAwarenessContext" => boxed(|_| Ok(2)),
+        // EnumChildWindows(親, proc, lParam)。子（孫も）を作った順に proc(hwnd, lParam) へ渡し、0 が返ったらやめる
+        "EnumChildWindows" => boxed(|e| {
+            let (parent, f, lp) = (a(e, 1)?, arg(e, 2)?, arg(e, 3)?);
+            let kids: Vec<u32> = e.gui.order.iter().copied().filter(|h| { let mut p = e.gui.windows.get(h).map(|w| w.parent).unwrap_or(0); while p != 0 && p != parent { p = e.gui.windows.get(&p).map(|w| w.parent).unwrap_or(0) } p == parent && *h != parent }).collect();
+            use crate::emu::Arg;
+            for h in kids {
+                let args = [Arg::Int(h as u64), Arg::Int(lp)];
+                let r = if e.bits() == 64 { e.call(f, &args)? } else { e.call32(f as u32, &args)? };
+                if r & 0xffff_ffff == 0 {
+                    break
+                }
+            }
+            Ok(1)
+        }),
+        // フックは動かさないが、成功したことにする（0 だと失敗として扱うプラグインがある）
+        "SetWindowsHookExW" | "SetWindowsHookExA" => boxed(|_| Ok(0x7f00)),
+        "UnhookWindowsHookEx" | "ChangeWindowMessageFilterEx" | "RegisterTouchWindow" => boxed(|_| Ok(1)),
         // SetTimer(hwnd, id, 間隔 ms, TIMERPROC)。ウィンドウが無ければ番号を作って返す。同じウィンドウと番号なら置き換える
         "SetTimer" => boxed(|e| {
             let (h, id, every, proc) = (a(e, 1)?, arg(e, 2)?, arg(e, 3)? & 0xffff_ffff, arg(e, 4)?);

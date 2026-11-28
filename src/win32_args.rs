@@ -24,7 +24,11 @@ pub fn gui_arg_count(name: &str) -> Option<u64> {
         "BeginPaint" | "EndPaint" | "GetWindowLongA" | "GetWindowRect" | "LoadBitmapA" | "LoadCursorA" | "ReleaseDC" | "SetCursorPos" | "UnregisterClassA" => 2,
         "FillRect" | "GetUpdateRect" | "SetWindowLongA" => 3,
         "DefWindowProcA" | "MapWindowPoints" | "SetTimer" => 4,
-        "KillTimer" => 2,
+        "KillTimer" | "RegisterTouchWindow" => 2,
+        "EnumChildWindows" => 3,
+        "SetWindowsHookExW" | "SetWindowsHookExA" | "ChangeWindowMessageFilterEx" => 4,
+        "UnhookWindowsHookEx" | "GetWindowDpiAwarenessContext" | "SetThreadDpiAwarenessContext" | "GetAwarenessFromDpiAwarenessContext" => 1,
+        "GetThreadDpiAwarenessContext" => 0,
         "DrawTextA" | "PeekMessageA" => 5,
         "CreateWindowExA" => 12,
         // MSIMG32
