@@ -103,6 +103,15 @@ impl JsVst {
         matches!(self.0, Plugin::X86(_))
     }
 
+    /// VST3 のクラスの id（32 桁の 16 進）。VST2 は undefined
+    #[wasm_bindgen(js_name = classId)]
+    pub fn class_id(&self) -> Option<String> {
+        match &self.0 {
+            Plugin::V3(v) => Some(v.cid_string()),
+            _ => None,
+        }
+    }
+
     /// VST3 か
     #[wasm_bindgen(getter, js_name = isVst3)]
     pub fn is_vst3(&self) -> bool {

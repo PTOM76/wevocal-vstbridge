@@ -328,6 +328,16 @@ impl Vst3Plugin {
     }
 
     /// つまみ index（params の順）を 0〜1 の値にする。次の process で処理に渡し、コントローラーにも知らせる
+    /// cid の文字列（32 桁の 16 進。VST SDK の FUID::toString と同じく、COM の並びの先頭 3 つは数として読む。.vstpreset と DAWproject で使う）
+    pub fn cid_string(&self) -> String {
+        let c = &self.cid;
+        let mut s = format!("{:08X}{:04X}{:04X}", u32::from_le_bytes([c[0], c[1], c[2], c[3]]), u16::from_le_bytes([c[4], c[5]]), u16::from_le_bytes([c[6], c[7]]));
+        for b in &c[8..] {
+            s.push_str(&format!("{b:02X}"));
+        }
+        s
+    }
+
     /// 識別番号（cid の先頭 4 バイト。VST2 の uniqueID の代わり）
     pub fn unique_id(&self) -> u32 {
         u32::from_le_bytes([self.cid[0], self.cid[1], self.cid[2], self.cid[3]])
