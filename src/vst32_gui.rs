@@ -102,6 +102,7 @@ pub trait Editor: EditorHost {
         // スレッドを少し進めてから（idle は 30 回ほど毎秒なので、時計は 33 ms 進める）、積まれたメッセージを届ける
         self.emu().run_threads(33)?;
         self.emu().deliver_posted()?;
+        self.emu().deliver_timers()?;
         self.dispatch_e(EFF_EDIT_IDLE, 0, 0, 0, 0.0)?;
         self.emu().paint_all()
     }

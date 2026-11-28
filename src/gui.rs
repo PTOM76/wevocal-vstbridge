@@ -5,6 +5,7 @@ use crate::gdi::{Bitmap, Gdi, Obj};
 use crate::mem::R;
 use std::collections::HashMap;
 
+pub const WM_TIMER: u32 = 0x113;
 pub const WM_PAINT: u32 = 0x0F;
 pub const WM_DESTROY: u32 = 0x02;
 
@@ -57,13 +58,15 @@ pub struct Gui {
     pub dibs: HashMap<u32, (u64, i32, i32, bool, u32)>,
     /// PostMessage で積まれたメッセージ（ウィンドウ, メッセージ, wParam, lParam）。idle のときに届ける
     pub posted: Vec<(u32, u32, u64, u64)>,
+    /// SetTimer のタイマー（ウィンドウ, 番号, 間隔 ms, TIMERPROC（0 なら WM_TIMER を送る）, 次に鳴る時刻 ms）。idle のときに届ける
+    pub timers: Vec<(u32, u64, u64, u64, u64)>,
     /// プラグインが渡したフォント（文字の形を答えるのに使う）
     pub fonts: crate::fonts::Fonts,
 }
 
 impl Gui {
     pub fn new() -> Gui {
-        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, pending_sp: 0, base: 0x1000_0000, dibs: HashMap::new(), posted: Vec::new(), fonts: Default::default() }
+        Gui { gdi: Gdi::new(), windows: HashMap::new(), order: Vec::new(), classes: HashMap::new(), next: 0x0003_0000, cursor: (0, 0), pointer: (0, 0), cursor_count: 0, keys: 0, automation: Vec::new(), root: 0, can_yield: false, pending: false, pending_sp: 0, base: 0x1000_0000, dibs: HashMap::new(), posted: Vec::new(), timers: Vec::new(), fonts: Default::default() }
     }
 
     /// ウィンドウを作る（描く面は bg で塗る）。ハンドルを返す
@@ -173,6 +176,26 @@ impl Emu {
     pub fn deliver_posted(&mut self) -> R<()> {
         for (h, m, w, l) in std::mem::take(&mut self.gui.posted) {
             self.send_message(h, m, w as u32, l as u32)?;
+        }
+        Ok(())
+    }
+
+    /// 時間が来たタイマーを鳴らす（TIMERPROC があれば呼び、無ければ WM_TIMER を送る）。時計は仮の時計（スレッドと同じ。idle で進む）
+    pub fn deliver_timers(&mut self) -> R<()> {
+        let now = crate::win_stubs::clock_ms(self);
+        let due: Vec<_> = self.gui.timers.iter().filter(|t| t.4 <= now).cloned().collect();
+        for (h, id, every, proc, _) in due {
+            // 鳴らす前に次の時刻へ進める（鳴らしている間に KillTimer されてもよいように）
+            if let Some(t) = self.gui.timers.iter_mut().find(|t| t.0 == h && t.1 == id) {
+                t.4 = now + every.max(1);
+            }
+            if proc != 0 {
+                use crate::emu::Arg;
+                let args = [Arg::Int(h as u64), Arg::Int(WM_TIMER as u64), Arg::Int(id), Arg::Int(now & 0xffff_ffff)];
+                if self.bits() == 64 { self.call(proc, &args)? } else { self.call32(proc as u32, &args)? };
+            } else {
+                self.send_message(h, WM_TIMER, id as u32, 0)?;
+            }
         }
         Ok(())
     }

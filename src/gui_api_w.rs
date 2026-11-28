@@ -168,7 +168,7 @@ pub fn resolve(name: &str) -> Option<HostFn> {
             e.gui.posted.push(m);
             Ok(1)
         }),
-        "TranslateMessage" | "SetTimer" | "KillTimer" | "SetWindowTextW" | "TrackMouseEvent" | "SetFocus" | "SetCapture" | "ReleaseCapture" | "ValidateRect" => boxed(|_| Ok(1)),
+"TranslateMessage" | "SetWindowTextW" | "TrackMouseEvent" | "SetFocus" | "SetCapture" | "ReleaseCapture" | "ValidateRect" => boxed(|_| Ok(1)),
         "LoadCursorW" | "LoadIconW" => boxed(|_| Ok(1)),
         // 描き直しは idle のたびに全部のウィンドウへ WM_PAINT を送る（paint_all）ので、ここでは何もしない
         "InvalidateRect" | "UpdateWindow" | "RedrawWindow" => boxed(|_| Ok(1)),
@@ -194,6 +194,21 @@ pub fn resolve(name: &str) -> Option<HostFn> {
                 }
             }
             Ok(1)
+        }),
+        // SetTimer(hwnd, id, 間隔 ms, TIMERPROC)。ウィンドウが無ければ番号を作って返す。同じウィンドウと番号なら置き換える
+        "SetTimer" => boxed(|e| {
+            let (h, id, every, proc) = (a(e, 1)?, arg(e, 2)?, arg(e, 3)? & 0xffff_ffff, arg(e, 4)?);
+            let id = if h == 0 { 0x7000 + e.gui.timers.len() as u64 + 1 } else { id };
+            let now = crate::win_stubs::clock_ms(e);
+            e.gui.timers.retain(|t| !(t.0 == h && t.1 == id));
+            e.gui.timers.push((h, id, every.max(10), proc, now + every.max(10)));
+            Ok(id)
+        }),
+        "KillTimer" => boxed(|e| {
+            let (h, id) = (a(e, 1)?, arg(e, 2)?);
+            let n = e.gui.timers.len();
+            e.gui.timers.retain(|t| !(t.0 == h && t.1 == id));
+            Ok((e.gui.timers.len() < n) as u64)
         }),
         // ---- 描画 ----
         "BeginPaint" => boxed(|e| {

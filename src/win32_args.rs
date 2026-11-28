@@ -23,7 +23,8 @@ pub fn gui_arg_count(name: &str) -> Option<u64> {
         "GetDoubleClickTime" => 0,
         "BeginPaint" | "EndPaint" | "GetWindowLongA" | "GetWindowRect" | "LoadBitmapA" | "LoadCursorA" | "ReleaseDC" | "SetCursorPos" | "UnregisterClassA" => 2,
         "FillRect" | "GetUpdateRect" | "SetWindowLongA" => 3,
-        "DefWindowProcA" | "MapWindowPoints" => 4,
+        "DefWindowProcA" | "MapWindowPoints" | "SetTimer" => 4,
+        "KillTimer" => 2,
         "DrawTextA" | "PeekMessageA" => 5,
         "CreateWindowExA" => 12,
         // MSIMG32
