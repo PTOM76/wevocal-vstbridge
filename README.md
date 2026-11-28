@@ -80,7 +80,11 @@ node tests/gain.wasm.mjs
 node scripts/export-to-lib.mjs ../wevocalsynth/wevocal-lib/
 ```
 
-wevocal-lib の `web/src/plugins/vst/` に `vstbridge.js`、`vstbridge.d.ts`、`vstbridge_bg.wasm`、`workletGlue.ts`（AudioWorklet 用に加工したグルー）を書き出す。同じフォルダーの `bridge.ts`、`gui.ts`、`index.ts` は lib 側で書くファイルなので上書きしない。書き出したあとは wevocal-lib でコミットし、Synth と Studio の submodule を更新する。
+`web/` に wasm と JS のグルー、`workletGlue.ts`（AudioWorklet 用に加工したグルー）をそろえ、`web/` の中身を wevocal-lib の `web/src/plugins/vst/` に書き出す。wasm を作り直したら、`workletGlue.ts` も必ず作り直す（古いと AudioWorklet で wasm の import が合わない）。
+
+`web/` はパッケージ（npm の wevocal-vstbridge）の中身で、AudioWorklet の processor（`processor.ts`）、読み込みの済んだ写し（`snapshotCore.ts`、`snapshotWorker.ts`、`chunkWorker.ts`）、VST の画面（`guiEngine.ts`、`guiRemote.ts`、`guiWorker.ts`）の正本である。これらは wevocal-lib の側では直さない。入口は `web/api.ts`。lib の `bridge.ts`、`gui.ts`、`index.ts`、`snapshot.ts` は WeVocal のプラグインの形にするファイルなので、lib 側で書く。
+
+書き出したあとは wevocal-lib でコミットし、Synth と Studio の submodule を更新する。
 
 ### ブラウザ（実機）で確かめる
 

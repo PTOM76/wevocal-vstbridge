@@ -1,0 +1,15 @@
+{
+  "name": "wevocal-vstbridge",
+  "version": "0.1.0",
+  "description": "Run Windows VST2 and VST3 plugins in the browser with an x86/x64 emulator compiled to WebAssembly (experimental)",
+  "license": "MPL-2.0",
+  "exports": {
+    ".": "./web/api.ts"
+  },
+  "files": [
+    "web",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false
+}

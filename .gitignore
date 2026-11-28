@@ -6,3 +6,9 @@
 /tests/browser/pkg-web
 /tests/browser/gain.dll
 /testplug/native32/target
+
+# web/ の生成物（scripts/export-to-lib.mjs が作る）
+web/vstbridge.js
+web/vstbridge.d.ts
+web/vstbridge_bg.wasm
+web/workletGlue.ts
