@@ -1,4 +1,4 @@
-//! VST3 の DLL を読み込み、クラスとつまみの一覧を出し、正弦波を通す。つまみ名（大文字小文字は区別しない）と値を渡すと、途中でそのつまみを変える（段階 1〜3 の確かめ）。
+//! VST3 の DLL を読み込み、クラスとつまみの一覧を出し、正弦波を通す。つまみ名（大文字小文字は区別しない）と値を渡すと、途中でそのつまみを変える。
 //! cargo run --release --example vst3 -- <.vst3 の DLL> [秒] [つまみ名] [値]
 use vstbridge::vst3::Vst3;
 use vstbridge::vst3_process::Vst3Plugin;

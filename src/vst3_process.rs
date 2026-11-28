@@ -31,6 +31,8 @@ pub const IID_IAUDIOPROCESSOR: [u8; 16] = tuid(0x42043F99, 0xB7DA453C, 0xA569E79
 pub const IID_IEDITCONTROLLER: [u8; 16] = tuid(0xDCD7BBE3, 0x7742448D, 0xA874AACC, 0x979C759E);
 pub const IID_IHOSTAPPLICATION: [u8; 16] = tuid(0x58E595CC, 0xDB2D4969, 0x8B6AAF8C, 0x36A664E5);
 pub const IID_IPARAMETERCHANGES: [u8; 16] = tuid(0xA4779663, 0x0BB64A56, 0xB44384A8, 0x466FEB9D);
+pub const IID_ICOMPONENTHANDLER: [u8; 16] = tuid(0x93A0BEA3, 0x0BD045DB, 0x8E890B0C, 0xC1E46AC6);
+pub const IID_IPLUGVIEW: [u8; 16] = tuid(0x5BC32507, 0xD06049EA, 0xA6151B52, 0x2B755B29);
 pub const IID_IPARAMVALUEQUEUE: [u8; 16] = tuid(0x01263A18, 0xED074F6F, 0x98C9D356, 0x4686F9BA);
 
 /// つまみの情報（ParameterInfo: id、title、shortTitle、units（UTF-16 の 128 文字ずつ）、stepCount、defaultNormalizedValue、unitId、flags）
@@ -156,6 +158,9 @@ pub struct Vst3Plugin {
     pub inputs: usize,
     pub outputs: usize,
     io: Option<Io>,
+    /// 画面（IPlugView。開いていなければ 0）と、その親のウィンドウ
+    pub(crate) view: u64,
+    pub(crate) view_root: std::rc::Rc<std::cell::Cell<u32>>,
 }
 
 impl Vst3Plugin {
@@ -276,6 +281,31 @@ impl Vst3Plugin {
                 });
             }
         }
+        // 画面でつまみを動かしたときの知らせ（IComponentHandler: beginEdit、performEdit、endEdit、restartComponent）。
+        // performEdit(id, 値) は、つまみの番号に直して gui.automation に積む（VST2 の audioMasterAutomate と同じ。JS が取り出して処理の側へ渡す）
+        if controller != 0 {
+            let ids: Vec<u32> = params.iter().map(|q| q.id).collect();
+            let handler = host_object(
+                &mut emu,
+                vec![IID_ICOMPONENTHANDLER],
+                vec![
+                    Box::new(|_e: &mut Emu| Ok(K_RESULT_OK)),
+                    Box::new(move |e: &mut Emu| {
+                        let id = crate::host_stubs::arg(e, 2)? as u32;
+                        // 値（double）は 3 番目の引数なので xmm2
+                        let v = f64::from_bits(e.cpu.xmm[2] as u64);
+                        if let Some(i) = ids.iter().position(|&x| x == id) {
+                            e.gui.automation.push((i as i32, v as f32));
+                        }
+                        Ok(K_RESULT_OK)
+                    }),
+                    Box::new(|_e: &mut Emu| Ok(K_RESULT_OK)),
+                    Box::new(|_e: &mut Emu| Ok(K_RESULT_OK)),
+                ],
+            )?;
+            // IEditController::setComponentHandler(handler)
+            vcall(&mut emu, controller, 16, &[Arg::Int(handler)])?;
+        }
         // つまみの変化を process に渡す IParameterChanges と、つまみごとの IParamValueQueue（オブジェクトの後ろの値が pending の何番目か）
         let pending: Pending = Default::default();
         let (p1, p2) = (pending.clone(), pending.clone());
@@ -324,7 +354,7 @@ impl Vst3Plugin {
         vcall(&mut emu, component, 11, &[Arg::Int(1)])?;
         vcall(&mut emu, processor, 8, &[Arg::Int(1)])?;
         emu.max_steps = crate::emu::MAX_STEPS;
-        Ok(Vst3Plugin { name: class.name.clone(), cid: class.cid, emu, component, processor, controller, params, separate, streams, pending, changes, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None })
+        Ok(Vst3Plugin { name: class.name.clone(), cid: class.cid, emu, component, processor, controller, params, separate, streams, pending, changes, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None, view: 0, view_root: Default::default() })
     }
 
     /// つまみ index（params の順）を 0〜1 の値にする。次の process で処理に渡し、コントローラーにも知らせる

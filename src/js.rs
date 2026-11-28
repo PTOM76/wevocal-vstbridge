@@ -317,7 +317,7 @@ impl JsVst {
         Ok(out.iter().map(|c| js_sys::Float32Array::from(c.as_slice())).collect())
     }
 
-    // ---- エディター（プラグイン自身の画面）。今は 32 ビットだけ ----
+    // ---- エディター（プラグイン自身の画面）。VST2（32、64 ビット）と VST3 ----
 
     /// 画面を持つか
     #[wasm_bindgen(js_name = hasEditor)]
@@ -325,7 +325,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.has_editor().unwrap_or(false),
             Plugin::X64(v) => v.has_editor().unwrap_or(false),
-            Plugin::V3(_) => false,
+            Plugin::V3(v) => v.has_editor(),
         }
     }
 
@@ -335,7 +335,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
-            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
+            Plugin::V3(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
         }
     }
 
@@ -345,7 +345,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
-            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
+            Plugin::V3(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
         }
     }
 
@@ -355,7 +355,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
-            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
+            Plugin::V3(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
         }
     }
 
@@ -365,7 +365,7 @@ impl JsVst {
         match &self.0 {
             Plugin::X86(v) => v.editor_frame().map(|(_, _, px)| px),
             Plugin::X64(v) => v.editor_frame().map(|(_, _, px)| px),
-            Plugin::V3(_) => None,
+            Plugin::V3(v) => v.editor_frame().map(|(_, _, px)| px),
         }
     }
 
@@ -375,7 +375,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
             Plugin::X64(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
-            Plugin::V3(_) => Vec::new(),
+            Plugin::V3(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
         }
     }
 
@@ -384,7 +384,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
-            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
+            Plugin::V3(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
         }
     }
 }
