@@ -24,6 +24,13 @@ fn main() {
     // 指定した所（省くと中央）を上へドラッグして、つまみの変化が届くか
     let x: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(fw / 2);
     let y: i32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(fh / 2);
+    // 窓の一覧（作った順）と、押す所に当たる窓
+    for h in &p.emu.gui.order {
+        if let Some(w) = p.emu.gui.windows.get(h) {
+            println!("  窓 {h:#x} {} 親 {:#x} {},{} {}x{}", w.class, w.parent, w.x, w.y, w.w, w.h);
+        }
+    }
+    println!("当たる窓 {:?}", p.emu.gui.hit(x, y));
     p.editor_mouse(0x201, x, y, 1).expect("down");
     for k in 1..20 {
         p.editor_mouse(0x200, x, y - k * 3, 1).expect("move");
