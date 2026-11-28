@@ -143,6 +143,9 @@ pub struct Vst3Plugin {
     /// IEditController（別のクラスか、component と同じオブジェクト。無ければ 0）
     pub controller: u64,
     pub params: Vec<ParamInfo>,
+    /// コントローラーが別のオブジェクトか（状態を両方に伝える）
+    separate: bool,
+    streams: crate::vst3_host::Streams,
     pending: Pending,
     /// IParameterChanges（process に渡す）
     changes: u64,
@@ -240,6 +243,17 @@ impl Vst3Plugin {
             vcall(&mut emu, component, 0, &[Arg::Int(iid), Arg::Int(out)])?;
             emu.mem.read_n(out, 8)?
         };
+        // コントローラーが別のオブジェクトなら、音の処理の状態を伝える（IEditController::setComponentState。ホストの決まった手順）
+        let separate = controller != 0 && controller != component;
+        let streams = crate::vst3_host::Streams::new(&mut emu)?;
+        if separate {
+            let s = streams.open(&mut emu, &[])?;
+            vcall(&mut emu, component, 13, &[Arg::Int(s)])?;
+            let data = streams.take(s);
+            let s = streams.open(&mut emu, &data)?;
+            vcall(&mut emu, controller, 5, &[Arg::Int(s)])?;
+            streams.take(s);
+        }
         // つまみの一覧（IEditController::getParameterCount、getParameterInfo）
         let mut params = Vec::new();
         if controller != 0 {
@@ -307,7 +321,7 @@ impl Vst3Plugin {
         vcall(&mut emu, component, 11, &[Arg::Int(1)])?;
         vcall(&mut emu, processor, 8, &[Arg::Int(1)])?;
         emu.max_steps = crate::emu::MAX_STEPS;
-        Ok(Vst3Plugin { emu, component, processor, controller, params, pending, changes, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None })
+        Ok(Vst3Plugin { emu, component, processor, controller, params, separate, streams, pending, changes, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None })
     }
 
     /// つまみ index（params の順）を 0〜1 の値にする。次の process で処理に渡し、コントローラーにも知らせる
@@ -322,6 +336,53 @@ impl Vst3Plugin {
         if self.controller != 0 {
             // IEditController::setParamNormalized(id, value)
             vcall(&mut self.emu, self.controller, 15, &[Arg::Int(id as u64), Arg::F64(value)])?;
+        }
+        Ok(())
+    }
+
+    /// 状態を取る（音の処理の状態と、別のコントローラーの状態。長さ 4 バイト（リトルエンディアン）と中身を 2 つ並べる）
+    pub fn get_state(&mut self) -> R<Vec<u8>> {
+        let s = self.streams.open(&mut self.emu, &[])?;
+        // IComponent::getState(stream)
+        vcall(&mut self.emu, self.component, 13, &[Arg::Int(s)])?;
+        let comp = self.streams.take(s);
+        let mut ctrl = Vec::new();
+        if self.separate {
+            let s = self.streams.open(&mut self.emu, &[])?;
+            // IEditController::getState(stream)
+            vcall(&mut self.emu, self.controller, 7, &[Arg::Int(s)])?;
+            ctrl = self.streams.take(s);
+        }
+        let mut out = Vec::with_capacity(8 + comp.len() + ctrl.len());
+        for part in [&comp, &ctrl] {
+            out.extend_from_slice(&(part.len() as u32).to_le_bytes());
+            out.extend_from_slice(part);
+        }
+        Ok(out)
+    }
+
+    /// 状態を戻す（get_state の形）。音の処理に戻し、別のコントローラーにも伝える。つまみの値は読み返す（get_param）
+    pub fn set_state(&mut self, data: &[u8]) -> R<()> {
+        let part = |at: usize| -> Option<(&[u8], usize)> {
+            let n = u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize;
+            Some((data.get(at + 4..at + 4 + n)?, at + 4 + n))
+        };
+        let Some((comp, next)) = part(0) else { return Err(Fault("状態の形が違う".into())) };
+        let ctrl = part(next).map(|x| x.0).unwrap_or(&[]);
+        // IComponent::setState(stream)
+        let s = self.streams.open(&mut self.emu, comp)?;
+        vcall(&mut self.emu, self.component, 12, &[Arg::Int(s)])?;
+        self.streams.take(s);
+        if self.separate {
+            // IEditController::setComponentState(stream)、setState(stream)
+            let s = self.streams.open(&mut self.emu, comp)?;
+            vcall(&mut self.emu, self.controller, 5, &[Arg::Int(s)])?;
+            self.streams.take(s);
+            if !ctrl.is_empty() {
+                let s = self.streams.open(&mut self.emu, ctrl)?;
+                vcall(&mut self.emu, self.controller, 6, &[Arg::Int(s)])?;
+                self.streams.take(s);
+            }
         }
         Ok(())
     }

@@ -180,6 +180,111 @@ pub fn create_instance(e: &mut Emu, make: &NewMessage) -> R<u64> {
     Ok(if obj != 0 { K_RESULT_OK } else { K_NO_INTERFACE })
 }
 
+pub const IID_IBSTREAM: [u8; 16] = tuid(0xC3BF6EA2, 0x30994752, 0x9B6BF990, 0x1EE33E9B);
+
+/// メモリのストリーム（IBStream）。中身はホストの側に持ち、オブジェクトの番地で引く
+#[derive(Default)]
+struct Stream {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+/// ストリームの関数の表と中身。new で空か、中身のあるストリームを作り、take で中身を取り出す
+pub struct Streams {
+    table: u64,
+    all: Rc<RefCell<HashMap<u64, Stream>>>,
+}
+
+impl Streams {
+    pub fn new(emu: &mut Emu) -> R<Streams> {
+        let all: Rc<RefCell<HashMap<u64, Stream>>> = Default::default();
+        let (a, b, c, d) = (all.clone(), all.clone(), all.clone(), all.clone());
+        let table = host_table(
+            emu,
+            vec![IID_IBSTREAM],
+            vec![
+                // read(buffer, numBytes, numBytesRead*)
+                Box::new(move |e: &mut Emu| {
+                    let (this, buf, n, done) = (arg(e, 1)?, arg(e, 2)?, arg(e, 3)? as u32 as usize, arg(e, 4)?);
+                    let chunk = {
+                        let mut m = a.borrow_mut();
+                        let s = m.entry(this).or_default();
+                        let end = (s.pos + n).min(s.data.len());
+                        let chunk = s.data[s.pos.min(end)..end].to_vec();
+                        s.pos = end;
+                        chunk
+                    };
+                    e.mem.write(buf, &chunk)?;
+                    if done != 0 {
+                        e.mem.write_n(done, 4, chunk.len() as u64)?;
+                    }
+                    Ok(K_RESULT_OK)
+                }),
+                // write(buffer, numBytes, numBytesWritten*)
+                Box::new(move |e: &mut Emu| {
+                    let (this, buf, n, done) = (arg(e, 1)?, arg(e, 2)?, arg(e, 3)? as u32 as usize, arg(e, 4)?);
+                    let mut bytes = vec![0u8; n];
+                    e.mem.read(buf, &mut bytes)?;
+                    {
+                        let mut m = b.borrow_mut();
+                        let s = m.entry(this).or_default();
+                        if s.data.len() < s.pos + n {
+                            s.data.resize(s.pos + n, 0);
+                        }
+                        s.data[s.pos..s.pos + n].copy_from_slice(&bytes);
+                        s.pos += n;
+                    }
+                    if done != 0 {
+                        e.mem.write_n(done, 4, n as u64)?;
+                    }
+                    Ok(K_RESULT_OK)
+                }),
+                // seek(pos, mode（0 頭から、1 今から、2 終わりから）, result*)
+                Box::new(move |e: &mut Emu| {
+                    let (this, pos, mode, result) = (arg(e, 1)?, arg(e, 2)? as i64, arg(e, 3)? as u32, arg(e, 4)?);
+                    let now = {
+                        let mut m = c.borrow_mut();
+                        let s = m.entry(this).or_default();
+                        let base = match mode {
+                            1 => s.pos as i64,
+                            2 => s.data.len() as i64,
+                            _ => 0,
+                        };
+                        s.pos = (base + pos).max(0) as usize;
+                        s.pos
+                    };
+                    if result != 0 {
+                        e.mem.write_n(result, 8, now as u64)?;
+                    }
+                    Ok(K_RESULT_OK)
+                }),
+                // tell(pos*)
+                Box::new(move |e: &mut Emu| {
+                    let (this, at) = (arg(e, 1)?, arg(e, 2)?);
+                    let now = d.borrow().get(&this).map(|s| s.pos).unwrap_or(0);
+                    if at != 0 {
+                        e.mem.write_n(at, 8, now as u64)?;
+                    }
+                    Ok(K_RESULT_OK)
+                }),
+            ],
+        )?;
+        Ok(Streams { table, all })
+    }
+
+    /// 中身 data のストリームを作る（位置は頭）
+    pub fn open(&self, emu: &mut Emu, data: &[u8]) -> R<u64> {
+        let obj = host_instance(emu, self.table, 0)?;
+        self.all.borrow_mut().insert(obj, Stream { data: data.to_vec(), pos: 0 });
+        Ok(obj)
+    }
+
+    /// ストリームの中身を取り出す（ストリームは捨てる）
+    pub fn take(&self, obj: u64) -> Vec<u8> {
+        self.all.borrow_mut().remove(&obj).map(|s| s.data).unwrap_or_default()
+    }
+}
+
 /// 音の処理（component）とコントローラーを、IConnectionPoint::connect で両方からつなぐ。どちらかが持っていなければ何もしない
 pub fn connect(emu: &mut Emu, component: u64, controller: u64) -> R<()> {
     let iid = emu.mem.alloc(16);
