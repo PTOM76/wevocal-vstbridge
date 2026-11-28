@@ -39,6 +39,12 @@ fn cstr(emu: &Emu, at: u64, n: usize) -> R<String> {
     emu.mem.read_cstr(at, n)
 }
 
+/// VST3 の DLL か（GetPluginFactory を書き出し、VST2 の入口 VSTPluginMain を持たない。名前の文字列を探すだけなので、読み込みはしない）
+pub fn is_vst3(dll: &[u8]) -> bool {
+    let has = |n: &[u8]| dll.windows(n.len()).any(|w| w == n);
+    has(b"GetPluginFactory\0") && !has(b"VSTPluginMain\0")
+}
+
 impl Vst3 {
     /// DLL のバイト列から読み込み、ファクトリーとクラスの一覧を取る
     pub fn load(dll: &[u8]) -> R<Vst3> {

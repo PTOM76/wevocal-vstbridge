@@ -1,15 +1,20 @@
-//! wasm-bindgen の窓口。JS（ブラウザ、Node）から VST2 の DLL を読み込み、名前、つまみ、音の処理を使えるようにする。
+//! wasm-bindgen の窓口。JS（ブラウザ、Node）から VST2、VST3 の DLL を読み込み、名前、つまみ、音の処理を使えるようにする。
 //! DLL が 32 ビットか 64 ビットかは PE ヘッダーで見分け、どちらも同じ JsVst として扱う
 use crate::loader::{Loaded, Loader};
 use crate::vst::Vst;
 use crate::vst32::Vst32;
 use crate::vst32_gui::Editor;
+use crate::vst3_process::Vst3Plugin;
 use wasm_bindgen::prelude::*;
 
 enum Plugin {
     X64(Vst),
     X86(Vst32),
+    V3(Vst3Plugin),
 }
+
+/// VST3 の音を処理する標本化周波数（VST2 と同じく固定）
+const VST3_RATE: f64 = 48000.0;
 
 #[wasm_bindgen]
 pub struct JsVst(Plugin);
@@ -26,24 +31,45 @@ impl From<Loaded> for JsVst {
 /// DLL の読み込みを少しずつ進める（AudioWorklet の中で、音のスレッドを長く止めないため）。
 /// new で置いたあと、step を終わる（true）まで呼び、finish で JsVst にする
 #[wasm_bindgen]
-pub struct JsVstLoader(Loader);
+pub struct JsVstLoader(Load);
+
+enum Load {
+    V2(Loader),
+    /// VST3 は少しずつは進めず、最初の step で開き切る（重い DLL は写しから戻す。snapshot.ts）
+    V3(Vec<u8>, Option<Vst3Plugin>),
+}
 
 #[wasm_bindgen]
 impl JsVstLoader {
     /// DLL を置き、import をつなぐ（命令はまだ動かさない）
     #[wasm_bindgen(constructor)]
     pub fn new(dll: &[u8]) -> Result<JsVstLoader, JsError> {
-        Loader::new(dll).map(JsVstLoader).map_err(|e| JsError::new(&e.0))
+        if crate::vst3::is_vst3(dll) {
+            return Ok(JsVstLoader(Load::V3(dll.to_vec(), None)));
+        }
+        Loader::new(dll).map(|l| JsVstLoader(Load::V2(l))).map_err(|e| JsError::new(&e.0))
     }
 
     /// 命令を最大 budget 個動かして読み込みを進める。終わったら true
     pub fn step(&mut self, budget: f64) -> Result<bool, JsError> {
-        self.0.step(budget as u64).map_err(|e| JsError::new(&e.0))
+        match &mut self.0 {
+            Load::V2(l) => l.step(budget as u64).map_err(|e| JsError::new(&e.0)),
+            Load::V3(dll, p) => {
+                if p.is_none() {
+                    *p = Some(Vst3Plugin::open(dll, VST3_RATE).map_err(|e| JsError::new(&e.0))?);
+                }
+                Ok(true)
+            }
+        }
     }
 
     /// 読み込みが終わったものを JsVst にする（この loader は使えなくなる）
     pub fn finish(self) -> Result<JsVst, JsError> {
-        self.0.finish().map(JsVst::from).map_err(|e| JsError::new(&e.0))
+        match self.0 {
+            Load::V2(l) => l.finish().map(JsVst::from).map_err(|e| JsError::new(&e.0)),
+            Load::V3(_, Some(p)) => Ok(JsVst(Plugin::V3(p))),
+            Load::V3(_, None) => Err(JsError::new("読み込みが終わっていない")),
+        }
     }
 }
 
@@ -52,6 +78,9 @@ impl JsVst {
     /// DLL のバイト列から読み込む（32 ビットも 64 ビットも）
     #[wasm_bindgen(constructor)]
     pub fn new(dll: &[u8]) -> Result<JsVst, JsError> {
+        if crate::vst3::is_vst3(dll) {
+            return Vst3Plugin::open(dll, VST3_RATE).map(|p| JsVst(Plugin::V3(p))).map_err(|e| JsError::new(&e.0));
+        }
         Loader::load(dll).map(JsVst::from).map_err(|e| JsError::new(&e.0))
     }
 
@@ -62,6 +91,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.emu.jit.clear(),
             Plugin::X64(v) => v.emu.jit.clear(),
+            Plugin::V3(v) => v.emu.jit.clear(),
         }
         #[cfg(target_arch = "wasm32")]
         crate::jit::install::reset_slots();
@@ -73,12 +103,19 @@ impl JsVst {
         matches!(self.0, Plugin::X86(_))
     }
 
+    /// VST3 か
+    #[wasm_bindgen(getter, js_name = isVst3)]
+    pub fn is_vst3(&self) -> bool {
+        matches!(self.0, Plugin::V3(_))
+    }
+
     /// JIT で実行した命令の割合（調査用。0..1）
     #[wasm_bindgen(js_name = jitCoverage)]
     pub fn jit_coverage(&self) -> f64 {
         let e = match &self.0 {
             Plugin::X86(v) => &v.emu,
             Plugin::X64(v) => &v.emu,
+            Plugin::V3(v) => &v.emu,
         };
         let t = e.jit_insns + e.interp_insns;
         if t == 0 { 0.0 } else { e.jit_insns as f64 / t as f64 }
@@ -96,6 +133,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.emu.jit.count_miss = true,
             Plugin::X64(v) => v.emu.jit.count_miss = true,
+            Plugin::V3(v) => v.emu.jit.count_miss = true,
         }
     }
 
@@ -105,6 +143,7 @@ impl JsVst {
         let e = match &self.0 {
             Plugin::X86(v) => &v.emu,
             Plugin::X64(v) => &v.emu,
+            Plugin::V3(v) => &v.emu,
         };
         let mut v: Vec<_> = e.jit_miss.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
@@ -118,6 +157,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.emu.jit.threshold = n,
             Plugin::X64(v) => v.emu.jit.threshold = n,
+            Plugin::V3(v) => v.emu.jit.threshold = n,
         }
     }
 
@@ -127,6 +167,7 @@ impl JsVst {
         let e = match &self.0 {
             Plugin::X86(v) => &v.emu,
             Plugin::X64(v) => &v.emu,
+            Plugin::V3(v) => &v.emu,
         };
         let j = &e.jit;
         format!("{} {:.0} {} {} {}", j.compiled, j.compile_ms, j.compiled_bytes, e.jit_calls, e.jit_insns)
@@ -138,6 +179,7 @@ impl JsVst {
         let e = match &mut self.0 {
             Plugin::X86(v) => &mut v.emu,
             Plugin::X64(v) => &mut v.emu,
+            Plugin::V3(v) => &mut v.emu,
         };
         e.jit.on = on;
         e.jit.clear();
@@ -147,6 +189,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X64(v) => v.name(),
             Plugin::X86(v) => v.name(),
+            Plugin::V3(v) => Ok(v.name.clone()),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -156,6 +199,7 @@ impl JsVst {
         match &self.0 {
             Plugin::X64(v) => v.num_params,
             Plugin::X86(v) => v.num_params,
+            Plugin::V3(v) => v.params.len() as i32,
         }
     }
 
@@ -164,6 +208,7 @@ impl JsVst {
         match &self.0 {
             Plugin::X64(v) => v.num_inputs,
             Plugin::X86(v) => v.num_inputs,
+            Plugin::V3(v) => v.inputs as i32,
         }
     }
 
@@ -172,6 +217,7 @@ impl JsVst {
         match &self.0 {
             Plugin::X64(v) => v.num_outputs,
             Plugin::X86(v) => v.num_outputs,
+            Plugin::V3(v) => v.outputs as i32,
         }
     }
 
@@ -181,6 +227,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X64(v) => v.param_name(index),
             Plugin::X86(v) => v.param_name(index),
+            Plugin::V3(v) => v.params.get(index as usize).map(|q| q.title.clone()).ok_or_else(|| crate::mem::Fault("つまみが無い".into())),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -190,6 +237,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X64(v) => v.set_param(index, value),
             Plugin::X86(v) => v.set_param(index, value),
+            Plugin::V3(v) => v.set_param(index as usize, value as f64),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -200,6 +248,7 @@ impl JsVst {
         match &self.0 {
             Plugin::X64(v) => v.unique_id(),
             Plugin::X86(v) => v.unique_id(),
+            Plugin::V3(v) => Ok(v.unique_id()),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -210,6 +259,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X64(v) => v.get_chunk(false),
             Plugin::X86(v) => v.get_chunk(false),
+            Plugin::V3(v) => v.get_state().map(Some),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -220,6 +270,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X64(v) => v.set_chunk(data, false),
             Plugin::X86(v) => v.set_chunk(data, false),
+            Plugin::V3(v) => v.set_state(data),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -229,6 +280,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X64(v) => v.get_param(index),
             Plugin::X86(v) => v.get_param(index),
+            Plugin::V3(v) => v.get_param(index as usize).map(|x| x as f32),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -239,6 +291,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X64(v) => v.send_midi([status, data1, data2], delta),
             Plugin::X86(v) => v.send_midi([status, data1, data2], delta),
+            Plugin::V3(_) => Ok(()),
         }
         .map_err(|e| JsError::new(&e.0))
     }
@@ -249,6 +302,7 @@ impl JsVst {
         let out = match &mut self.0 {
             Plugin::X64(v) => v.process(&input, frames),
             Plugin::X86(v) => v.process(&input, frames),
+            Plugin::V3(v) => v.process(&input, frames),
         }
         .map_err(|e| JsError::new(&e.0))?;
         Ok(out.iter().map(|c| js_sys::Float32Array::from(c.as_slice())).collect())
@@ -262,6 +316,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.has_editor().unwrap_or(false),
             Plugin::X64(v) => v.has_editor().unwrap_or(false),
+            Plugin::V3(_) => false,
         }
     }
 
@@ -271,6 +326,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_open().map(|(w, h)| vec![w, h]).map_err(|e| JsError::new(&e.0)),
+            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
         }
     }
 
@@ -280,6 +336,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_mouse(msg, x, y, keys).map_err(|e| JsError::new(&e.0)),
+            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
         }
     }
 
@@ -289,6 +346,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_idle().map_err(|e| JsError::new(&e.0)),
+            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
         }
     }
 
@@ -298,6 +356,7 @@ impl JsVst {
         match &self.0 {
             Plugin::X86(v) => v.editor_frame().map(|(_, _, px)| px),
             Plugin::X64(v) => v.editor_frame().map(|(_, _, px)| px),
+            Plugin::V3(_) => None,
         }
     }
 
@@ -307,6 +366,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
             Plugin::X64(v) => v.editor_changes().into_iter().flat_map(|(i, x)| [i as f32, x]).collect(),
+            Plugin::V3(_) => Vec::new(),
         }
     }
 
@@ -315,6 +375,7 @@ impl JsVst {
         match &mut self.0 {
             Plugin::X86(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
             Plugin::X64(v) => v.editor_close().map_err(|e| JsError::new(&e.0)),
+            Plugin::V3(_) => Err(JsError::new("VST3 の画面はまだ対応していない")),
         }
     }
 }

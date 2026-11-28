@@ -143,6 +143,9 @@ pub struct Vst3Plugin {
     /// IEditController（別のクラスか、component と同じオブジェクト。無ければ 0）
     pub controller: u64,
     pub params: Vec<ParamInfo>,
+    /// クラスの名前と cid
+    pub name: String,
+    pub cid: [u8; 16],
     /// コントローラーが別のオブジェクトか（状態を両方に伝える）
     separate: bool,
     streams: crate::vst3_host::Streams,
@@ -321,10 +324,15 @@ impl Vst3Plugin {
         vcall(&mut emu, component, 11, &[Arg::Int(1)])?;
         vcall(&mut emu, processor, 8, &[Arg::Int(1)])?;
         emu.max_steps = crate::emu::MAX_STEPS;
-        Ok(Vst3Plugin { emu, component, processor, controller, params, separate, streams, pending, changes, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None })
+        Ok(Vst3Plugin { name: class.name.clone(), cid: class.cid, emu, component, processor, controller, params, separate, streams, pending, changes, inputs: if ins > 0 { 2 } else { 0 }, outputs: if outs > 0 { 2 } else { 0 }, io: None })
     }
 
     /// つまみ index（params の順）を 0〜1 の値にする。次の process で処理に渡し、コントローラーにも知らせる
+    /// 識別番号（cid の先頭 4 バイト。VST2 の uniqueID の代わり）
+    pub fn unique_id(&self) -> u32 {
+        u32::from_le_bytes([self.cid[0], self.cid[1], self.cid[2], self.cid[3]])
+    }
+
     pub fn set_param(&mut self, index: usize, value: f64) -> R<()> {
         let Some(p) = self.params.get(index) else { return Ok(()) };
         let id = p.id;
@@ -342,6 +350,12 @@ impl Vst3Plugin {
 
     /// 状態を取る（音の処理の状態と、別のコントローラーの状態。長さ 4 バイト（リトルエンディアン）と中身を 2 つ並べる）
     pub fn get_state(&mut self) -> R<Vec<u8>> {
+        // 渡していないつまみの変化は、無音を短く通して音の処理に届けてから保存する
+        if !self.pending.borrow().is_empty() {
+            let z = vec![0f32; 32];
+            let input: Vec<Vec<f32>> = (0..self.inputs.max(1)).map(|_| z.clone()).collect();
+            self.process(&input, 32)?;
+        }
         let s = self.streams.open(&mut self.emu, &[])?;
         // IComponent::getState(stream)
         vcall(&mut self.emu, self.component, 13, &[Arg::Int(s)])?;
